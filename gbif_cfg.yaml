@@ -1,0 +1,7 @@
+payload: payload.json
+format: dwca
+dataset_dir: data/classif/mini
+max_img_spc: 500
+drop_duplicates: true
+num_threads: 100 # Number of thread for mutlithreaded download
+add_cv_col: true

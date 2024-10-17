@@ -1,0 +1,45 @@
+{
+    "creator": "gmougeot", 
+    "notificationAddresses": [
+        "gmo@ecos.au.dk"
+    ],
+    "sendNotification": true,
+    "format": "DWCA",
+    "predicate": {
+        "type": "and",
+        "predicates": [
+            {
+                "type": "equals",
+                "key": "TAXON_KEY",
+                "value": "54"  
+            },
+            {
+                "type": "equals",
+                "key": "MEDIA_TYPE",
+                "value": "StillImage"
+            },
+            {
+                "type": "in",
+                "key": "COUNTRY",
+                "values": [
+                    "AL", "AD", "AT", "BY", "BE", "BA", "BG", "HR", "CY",
+                    "CZ", "DK", "EE", "FI", "FR", "DE", "GR", "HU", "IS",
+                    "IE", "IT", "LV", "LI", "LT", "LU", "MT", "MD", "MC",
+                    "ME", "NL", "MK", "NO", "PL", "PT", "RO", "RU", "SM",
+                    "RS", "SK", "SI", "ES", "SE", "CH", "TR", "UA", "GB",
+                    "VA"
+                ]
+            },
+            {
+                "type": "equals",
+                "key": "YEAR",
+                "value": "2017"
+            },
+            {
+                "type": "equals",
+                "key": "MONTH",
+                "value": "12"
+            }
+        ]
+    }
+}
