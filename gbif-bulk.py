@@ -16,11 +16,16 @@ from dwca.read import DwCAReader
 from dwca.darwincore.utils import qualname as qn
 
 import hashlib
+from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map, thread_map
 from functools import partial
 import logging
 from datetime import datetime
 import sys
+import PIL
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from PIL import Image
 
 # -----------------------------------------------------------------------------
 # Use the Occurence API to get a download file with image URLs
@@ -166,6 +171,9 @@ KEYS_OCC = [
     "taxonKey",
     "acceptedTaxonKey",
     "datasetKey",
+    ]
+
+KEYS_GBIF = [
     "kingdomKey",
     "phylumKey",
     "classKey",
@@ -173,7 +181,7 @@ KEYS_OCC = [
     "familyKey",
     "genusKey",
     "speciesKey",
-    ]
+]
 
 def preprocess_occurrences(config, occurrences_path: Path):
     """Prepare the download file - remove duplicates, limit the number of download per species, remove the columns we don't need, etc.
@@ -189,7 +197,7 @@ def preprocess_occurrences(config, occurrences_path: Path):
             images_metadata = {}
 
             # Add keys for occurrence and multimedia
-            for k in KEYS_OCC + KEYS_MULT:
+            for k in KEYS_OCC + KEYS_GBIF + KEYS_MULT:
                 images_metadata[k] = []
 
             for row in dwca:
@@ -207,7 +215,7 @@ def preprocess_occurrences(config, occurrences_path: Path):
                         # This is identical for all multimedia
                         for k,v in row.data.items():
                             k = k.split('/')[-1]
-                            if k in KEYS_OCC:
+                            if k in KEYS_OCC + KEYS_GBIF:
                                 images_metadata[k] += [v]
 
                         # Add extension metadata
@@ -220,8 +228,9 @@ def preprocess_occurrences(config, occurrences_path: Path):
     
     df = pd.DataFrame(images_metadata)
 
-    # Remove rows where speciesKey is either an empty string or NaN
-    df = df.loc[df['speciesKey'].notna() & (df['speciesKey'] != '')]
+    # Remove rows where any of the specified columns are NaN or empty strings
+    df = df.dropna(subset=KEYS_GBIF)  # Drop rows with NaN in KEYS_GBIF
+    df = df.loc[~df[KEYS_GBIF].eq('').any(axis=1)]  # Drop rows with empty strings in KEYS_GBIF
     
     # Remove duplicates
     if 'drop_duplicates' in config.keys() and config['drop_duplicates']:
@@ -318,7 +327,7 @@ def get_one_img(
             time.sleep(sleep)
             get_one_img(occ, output_path, logger, num_attempts=num_attempts+1)
 
-def set_logger(filename):
+def set_logger(log_dir=Path("."), suffix=""):
     """Helper function to set up the logging process.
 
     Parameters
@@ -328,13 +337,15 @@ def set_logger(filename):
     """
     logger = logging.getLogger(__name__)
 
+    log_name = datetime.now().strftime("%Y%m%d-%H%M%S") + suffix + ".log"
+    filename = log_dir / log_name
     logging.basicConfig(
         format='%(asctime)s: %(levelname)s: %(filename)s: %(message)s',
         encoding='utf-8', 
         level=logging.INFO,
         handlers=[logging.FileHandler(filename=filename)]
         )
-    return logger
+    return logger, filename
 
 def download(config, preprocessed_occurrences: Path, verbose=False):
     """Download the images with multi-threading.
@@ -356,9 +367,8 @@ def download(config, preprocessed_occurrences: Path, verbose=False):
     os.makedirs(output_path, exist_ok=True)
 
     # Logger
-    log_name = datetime.now().strftime("%Y%m%d-%H%M%S") + "_download.log"
-    log_filename = Path(config['dataset_dir']) / preprocessed_occurrences.stem / log_name
-    logger=set_logger(log_filename)
+    log_dir = Path(config['dataset_dir']) / preprocessed_occurrences.stem
+    logger, log_filename = set_logger(log_dir, "_download")
 
     get_img = partial(get_one_img, output_path=output_path, logger=logger)
 
@@ -368,9 +378,155 @@ def download(config, preprocessed_occurrences: Path, verbose=False):
     return output_path
 
 # -----------------------------------------------------------------------------
-# Clean the dataset - remove corrupted images and duplicates, update the occurrence file, add a column for cross-validation, etc.
+# Clean the dataset - remove corrupted images and duplicates, remove empty folders, update the occurrence file, add a column for cross-validation, etc.
+
+def is_corrupted(image_path):
+    """
+    Check if the image at image_path is corrupted.
+    Returns True if the image is corrupted, False otherwise.
+    """
+    try:
+        with Image.open(image_path) as img:
+            img.verify()  # Verify that it is, in fact, an image
+    except (IOError, SyntaxError, PIL.UnidentifiedImageError, Image.DecompressionBombError) as e:
+        return image_path
+    return None
+
+def get_image_paths(folder):
+    """
+    Recursively collect all image file paths in a folder.
+    Returns a list of image file paths.
+    """
+    image_paths = []
+    for root, _, files in os.walk(folder):
+        for file in files:
+            if file.lower().endswith(('.png', '.jpg', '.jpeg', '.tiff', '.bmp', '.gif')):
+                image_paths.append(os.path.join(root, file))
+    return image_paths
+
+def handle_corrupted(corrupted_paths, remove=False, output_file=None):
+    """
+    Handle corrupted images by either removing them or saving their paths to a file.
+    
+    Parameters:
+    corrupted_paths : list
+        List of corrupted image file paths.
+    remove : bool
+        If True, remove corrupted images from disk.
+    output_file : str
+        If provided, save corrupted image paths to this file.
+    """
+    if remove:
+        print("Removing corrupted images...")
+        for path in corrupted_paths:
+            try:
+                os.remove(path)
+            except Exception as e:
+                print(f"Error removing {path}: {e}")
+        print("Corrupted images removed.")
+    if output_file:
+        try:
+            with open(output_file, 'w') as f:
+                for path in corrupted_paths:
+                    f.write(f"{path}\n")
+            print(f"Corrupted image paths saved to {output_file}")
+        except Exception as e:
+            print(f"Error saving to file: {e}")
+
+def check_corrupted(config, img_dir: Path):
+    """
+    Process images in the given img_dir, checking for corruption.
+    Can either remove corrupted images or save their paths to a file.
+
+    Parameters:
+    img_dir : str
+        Path to the img_dir containing images.
+    remove : bool
+        If True, remove corrupted images.
+    output_file : str
+        If provided, save corrupted image paths to this file.
+    """
+    print("Checking for corrupted images...")
+    
+    image_paths = get_image_paths(img_dir)
+    
+    # corrupted_paths = [path for path in image_paths if is_image_corrupted(path)]
+    corrupted_paths = thread_map(is_corrupted, image_paths, max_workers=config['num_threads'])
+
+    # Filter out None results, keeping only the corrupted image paths
+    corrupted_paths = [path for path in corrupted_paths if path]
+    
+    if corrupted_paths:
+        print(f"There are {len(corrupted_paths)} corrupted images.")
+        output_file = Path(config['dataset_dir']) / "corrupted_images.txt"
+        handle_corrupted(corrupted_paths, remove=config['remove_corrupted'], output_file=output_file)
+    else:
+        print("No corrupted images found.")
+
+# TO TEST:
+def hash_image(image_path):
+    """Hashes the image using SHA-256 and returns the hash and the image path."""
+    try:
+        with Image.open(image_path) as img:
+            img = img.convert('RGB')  # Ensure consistency
+            img_bytes = img.tobytes()
+            return hashlib.sha256(img_bytes).hexdigest(), image_path
+    except Exception as e:
+        print(f"Error hashing image {image_path}: {e}")
+        return None, image_path
+
+def check_duplicates(config, img_dir):
+    """Finds and removes original and duplicate images if they are in different subfolders."""
+
+    print("Checking for duplicates...")
+
+    image_hashes = {}  # Store hash and associated image paths
+    to_remove = set()  # Store paths of images to be removed
+
+    # Walk through all subdirectories and gather image files
+    image_paths = []
+    for root, _, files in os.walk(img_dir):
+        for file in files:
+            if file.lower().endswith(('png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff')):
+                image_paths.append(os.path.join(root, file))
+
+    # Hash images in parallel
+    hashes = thread_map(hash_image, image_paths, max_workers=config['num_threads'])
+    for image_hash, image_path in hashes:
+        if image_hash:
+            if image_hash in image_hashes:
+                # If the hash is already seen, append the new path
+                image_hashes[image_hash].append(image_path)
+            else:
+                # Initialize with the first occurrence of the hash
+                image_hashes[image_hash] = [image_path]
+
+    # Now, check for duplicates spread across different directories
+    for image_list in image_hashes.values():
+        folders = {os.path.dirname(image) for image in image_list}  # Get the set of folders
+        if len(folders) > 1:  # If the same hash is in multiple folders
+            to_remove.update(image_list)  # Mark all instances for removal
+            # print("multi-folder",image_list)
+        elif len(image_list) > 1: # If multiple duplicates in the same folder then keep one
+            to_remove.update(image_list[1:])
+            # print("multi-images", image_list)
 
 
+    # Remove duplicates and originals that are in different subfolders
+    if config['remove_duplicates'] and len(to_remove) > 0:
+        for image_path in to_remove:
+            try:
+                print("removed")
+                # os.remove(image_path)
+            except Exception as e:
+                print(f"Error removing file {image_path}: {e}")
+        print("Duplicates removed.")
+    elif len(to_remove) == 0:
+        print("No duplicate to remove.")
+
+def postprocessing(config, img_dir):
+    # check_corrupted(config, img_dir)
+    check_duplicates(config, img_dir)
 
 # -----------------------------------------------------------------------------
 # Config
@@ -397,15 +553,20 @@ def main():
 
     # Download the occurrence file generated by GBIF
     # occurrences_path = download_occurrences(config, download_key=download_key)
-    occurrences_path = Path("/home/george/codes/gbif-request/data/classif/mini/0013397-241007104925546.zip")
+    # occurrences_path = Path("/home/george/codes/gbif-request/data/classif/mini/0013397-241007104925546.zip")
 
     # Preprocess the occurrence file
-    preprocessed_occurrences = preprocess_occurrences(config, occurrences_path)
+    # preprocessed_occurrences = preprocess_occurrences(config, occurrences_path)
+    # preprocessed_occurrences = Path("/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546.parquet")
+
 
     # Download the images
-    images_path = download(config, preprocessed_occurrences)
+    # img_dir = download(config, preprocessed_occurrences)
+    img_dir = Path("/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546/images")
 
     # Clean the downloaded dataset
+    postprocessing(config, img_dir)
+
 
 
 # -----------------------------------------------------------------------------
