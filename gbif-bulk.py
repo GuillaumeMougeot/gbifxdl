@@ -276,7 +276,7 @@ def get_one_img(
                     return 
                 else:
                     time.sleep(sleep)
-                    get_one_img(occ, output_path, logger, num_attempts=num_attempts+1)
+                    return get_one_img(occ, output_path, logger, num_attempts=num_attempts+1)
             elif response.status_code == 403:
                 logger.info(f"403 Forbidden access for {occ}.")
                 return 
@@ -318,6 +318,7 @@ def get_one_img(
                     if not block:
                         break
                     handle.write(block)
+            return img_name
     except Exception as e:
         if num_attempts > max_num_attempts:
             logger.info(f"Reached maximum number of attempts for occurence {occ}. Skipping it.")
@@ -325,7 +326,7 @@ def get_one_img(
         else:
             logger.info(f"Error: {e}. Waiting {sleep} secondes and reattempting.")
             time.sleep(sleep)
-            get_one_img(occ, output_path, logger, num_attempts=num_attempts+1)
+            return get_one_img(occ, output_path, logger, num_attempts=num_attempts+1)
 
 def set_logger(log_dir=Path("."), suffix=""):
     """Helper function to set up the logging process.
@@ -348,7 +349,7 @@ def set_logger(log_dir=Path("."), suffix=""):
     return logger, filename
 
 def download(config, preprocessed_occurrences: Path, verbose=False):
-    """Download the images with multi-threading.
+    """Download the images with multi-threading. Adds the image filenames in preprocessed_occurrences.
 
     Takes care of networks problems.
 
@@ -373,8 +374,13 @@ def download(config, preprocessed_occurrences: Path, verbose=False):
     get_img = partial(get_one_img, output_path=output_path, logger=logger)
 
     print("Downloading the images...")
-    r = thread_map(get_img, occs, max_workers=config['num_threads'])
+    img_names = thread_map(get_img, occs, max_workers=config['num_threads'])
     print(f"Download done. Downloaded images can be found in {output_path} and download logs in {log_filename}.")
+
+    # TODO: Updates occurrence file by adding the filenames
+    df['filename'] = img_names
+    df.to_parquet(preprocessed_occurrences, engine='pyarrow', compression='gzip')
+    print("Updated occurrence file to integrate the image filenames.")
     return output_path
 
 # -----------------------------------------------------------------------------
@@ -447,7 +453,7 @@ def check_corrupted(config, img_dir: Path):
         If provided, save corrupted image paths to this file.
     """
     print("Checking for corrupted images...")
-    
+
     image_paths = get_image_paths(img_dir)
     
     # corrupted_paths = [path for path in image_paths if is_image_corrupted(path)]
@@ -516,17 +522,57 @@ def check_duplicates(config, img_dir):
     if config['remove_duplicates'] and len(to_remove) > 0:
         for image_path in to_remove:
             try:
-                print("removed")
-                # os.remove(image_path)
+                os.remove(image_path)
             except Exception as e:
                 print(f"Error removing file {image_path}: {e}")
         print("Duplicates removed.")
     elif len(to_remove) == 0:
         print("No duplicate to remove.")
 
-def postprocessing(config, img_dir):
-    # check_corrupted(config, img_dir)
+def remove_empty_folders(path):
+    # Iterate through all the subdirectories and files recursively
+    for foldername, subfolders, filenames in os.walk(path, topdown=False):
+        # Check if the folder is empty (no files and no subfolders)
+        if not subfolders and not filenames:
+            try:
+                os.rmdir(foldername)  # Remove the empty folder
+                # print(f"Removed empty folder: {foldername}")
+            except OSError as e:
+                print(f"Error removing {foldername}: {e}")
+
+def update_occurrences(occurrences):
+    """Removed non-existent file, add cross-validation.
+    """
+    return
+
+def remove_nonexistent_files(df, img_dir):
+    # Step 1: Build a set of all files (without paths) found in the folder and subfolders
+    file_set = set()
+    
+    for _, _, files in os.walk(img_dir):
+        for file in files:
+            if file.lower().endswith(('png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff')):
+                file_set.add(file)
+    
+    # Step 2: Filter the DataFrame: keep rows where the filename exists in the folder
+    df_filtered = df[df['filename'].isin(file_set)].copy()
+    assert len(df_filtered)==len(file_set), f"{len(df)}!={len(file_set)}"
+    return df_filtered
+
+def postprocessing(config, img_dir, occurrences):
+    # Check and remove corrupted files
+    check_corrupted(config, img_dir)
+
+    # Check and remove duplicates
     check_duplicates(config, img_dir)
+
+    # Remove empty folders
+    remove_empty_folders(img_dir)
+
+    # Updates the occurrence file
+    occurrences = remove_nonexistent_files(pd.read_parquet(occurrences), img_dir)
+
+    return occurrences
 
 # -----------------------------------------------------------------------------
 # Config
@@ -557,7 +603,7 @@ def main():
 
     # Preprocess the occurrence file
     # preprocessed_occurrences = preprocess_occurrences(config, occurrences_path)
-    # preprocessed_occurrences = Path("/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546.parquet")
+    preprocessed_occurrences = Path("/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546.parquet")
 
 
     # Download the images
@@ -565,7 +611,7 @@ def main():
     img_dir = Path("/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546/images")
 
     # Clean the downloaded dataset
-    postprocessing(config, img_dir)
+    occurrencess = postprocessing(config, img_dir, preprocessed_occurrences)
 
 
 
