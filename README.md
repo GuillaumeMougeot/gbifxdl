@@ -1,4 +1,4 @@
-# gbif-request
+# gbifxdl
 
 gbif-noctu, gbif-ctfb : get taxonID from GBIF using species name.
 
