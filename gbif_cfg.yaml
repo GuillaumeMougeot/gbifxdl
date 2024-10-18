@@ -6,3 +6,5 @@ num_threads: 100 # Number of thread for mutlithreaded download
 remove_corrupted: false # Remove corrupted images
 remove_duplicates: true # Remove image duplicates
 add_cv_col: true
+ood_th: 5 # Maximum number of images per species for it to be considered OOD
+seed: 42 # Random seed

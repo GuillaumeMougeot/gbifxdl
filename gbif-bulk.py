@@ -27,6 +27,8 @@ import PIL
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image
 
+from sklearn.model_selection import StratifiedKFold
+
 # -----------------------------------------------------------------------------
 # Use the Occurence API to get a download file with image URLs
 
@@ -257,7 +259,7 @@ def get_one_img(
         output_path: Path,
         logger: logging.Logger,
         num_attempts=0,
-        sleep=20,
+        sleep=5,
         max_num_attempts=5,
         verbose=False,
         ):
@@ -267,7 +269,8 @@ def get_one_img(
     # print(inputs)
     url, format, species = occ
     try:
-        with requests.get(url, stream=True) as response:
+        # with requests.get(url, stream=True) as response:
+        with requests.get(url) as response:
 
             if response.status_code == 429:
                 logger.info(f"429 Too many requests for {occ}. Waiting {sleep} and reattempting.")
@@ -275,8 +278,12 @@ def get_one_img(
                     logger.info(f"Reached maximum number of attempts for occurence {occ}. Skipping it.")
                     return 
                 else:
-                    time.sleep(sleep)
-                    return get_one_img(occ, output_path, logger, num_attempts=num_attempts+1)
+                    if 'Retry-After' in response.headers:
+                        sleep429 = int(response.headers["Retry-After"])
+                    else:
+                        sleep429 = sleep
+                    time.sleep(sleep429)
+                    return get_one_img(occ, output_path, logger, sleep=min(sleep429*2,20), num_attempts=num_attempts+1)
             elif response.status_code == 403:
                 logger.info(f"403 Forbidden access for {occ}.")
                 return 
@@ -312,12 +319,17 @@ def get_one_img(
             # Create dir and dl image
             os.makedirs(img_dir, exist_ok=True)
 
-            # Careful with 
-            with open(img_path, 'wb') as handle:
-                for block in response.iter_content(1024):
-                    if not block:
-                        break
-                    handle.write(block)
+            # Careful with the function below, it can corrupt the image
+            # with open(img_path, 'wb') as handle:
+            #     for block in response.iter_content(1024):
+            #         if not block:
+            #             break
+            #         handle.write(block)
+
+            # More stable?
+            with open(img_path, 'wb') as handler:
+                handler.write(response.content)
+            
             return img_name
     except Exception as e:
         if num_attempts > max_num_attempts:
@@ -384,19 +396,11 @@ def download(config, preprocessed_occurrences: Path, verbose=False):
     return output_path
 
 # -----------------------------------------------------------------------------
-# Clean the dataset - remove corrupted images and duplicates, remove empty folders, update the occurrence file, add a column for cross-validation, etc.
-
-def is_corrupted(image_path):
-    """
-    Check if the image at image_path is corrupted.
-    Returns True if the image is corrupted, False otherwise.
-    """
-    try:
-        with Image.open(image_path) as img:
-            img.verify()  # Verify that it is, in fact, an image
-    except (IOError, SyntaxError, PIL.UnidentifiedImageError, Image.DecompressionBombError) as e:
-        return image_path
-    return None
+# Clean the dataset 
+# - remove corrupted images and duplicates
+# - remove empty folders
+# - update the occurrence file
+# - add a column for cross-validation
 
 def get_image_paths(folder):
     """
@@ -409,6 +413,18 @@ def get_image_paths(folder):
             if file.lower().endswith(('.png', '.jpg', '.jpeg', '.tiff', '.bmp', '.gif')):
                 image_paths.append(os.path.join(root, file))
     return image_paths
+
+def is_corrupted(image_path):
+    """
+    Check if the image at image_path is corrupted.
+    Returns True if the image is corrupted, False otherwise.
+    """
+    try:
+        with Image.open(image_path) as img:
+            img.verify()  # Verify that it is, in fact, an image
+    except (IOError, SyntaxError, PIL.UnidentifiedImageError, Image.DecompressionBombError) as e:
+        return image_path
+    return None
 
 def handle_corrupted(corrupted_paths, remove=False, output_file=None):
     """
@@ -525,7 +541,7 @@ def check_duplicates(config, img_dir):
                 os.remove(image_path)
             except Exception as e:
                 print(f"Error removing file {image_path}: {e}")
-        print("Duplicates removed.")
+        print(f"{len(to_remove)} duplicates were removed.")
     elif len(to_remove) == 0:
         print("No duplicate to remove.")
 
@@ -540,13 +556,10 @@ def remove_empty_folders(path):
             except OSError as e:
                 print(f"Error removing {foldername}: {e}")
 
-def update_occurrences(occurrences):
-    """Removed non-existent file, add cross-validation.
-    """
-    return
+def remove_nonexistent_files(occurrences, img_dir):
+    df = pd.read_parquet(occurrences)
 
-def remove_nonexistent_files(df, img_dir):
-    # Step 1: Build a set of all files (without paths) found in the folder and subfolders
+    # Build a set of all files (without paths) found in the folder and subfolders
     file_set = set()
     
     for _, _, files in os.walk(img_dir):
@@ -554,10 +567,61 @@ def remove_nonexistent_files(df, img_dir):
             if file.lower().endswith(('png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff')):
                 file_set.add(file)
     
-    # Step 2: Filter the DataFrame: keep rows where the filename exists in the folder
+    # Filter the DataFrame: keep rows where the filename exists in the folder
     df_filtered = df[df['filename'].isin(file_set)].copy()
+
+    # Final check if the number of images corresponds to the length of the occurrence file
     assert len(df_filtered)==len(file_set), f"{len(df)}!={len(file_set)}"
-    return df_filtered
+
+    # Save back the file
+    df_filtered.to_parquet(occurrences, engine='pyarrow', compression='gzip')
+
+# def add_set_column(df, ood_th, shuffle=True, seed=None):
+def add_set_column(config, occurrences):
+    """Split the train set and the test set.
+
+    There are two test sets:
+    * test_ood with species that have less than ood_th images and are considered as out of distribution
+    * test_in with species in the distribution.
+    
+    Species with more than ood_th images are split in 5:
+    * One set is the test_in
+    * Sets 0-3 are validation sets. This is thus a 4-fold splitting.
+    """
+
+    ood_th = config['ood_th']
+    seed = config['seed']
+
+    # Read occurrences
+    df = pd.read_parquet(occurrences)
+
+    # Count the number of filenames per speciesKey
+    species_counts = df['speciesKey'].value_counts()
+    
+    # Identify species with less than ood_th filenames
+    ood_species = species_counts[species_counts < ood_th].index
+    
+    # Create a new 'set' column and initialize it with None
+    df['set'] = None
+    
+    # Label rows with 'test_ood' for species with less than ood_th filenames
+    df.loc[df['speciesKey'].isin(ood_species), 'set'] = 'test_ood'
+    
+    # Filter out the ood species for the remaining processing
+    remaining_df = df[~df['speciesKey'].isin(ood_species)]
+    
+    # Initialize StratifiedKFold with 5 splits
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
+    
+    # Assign fold numbers (0 to 4) to each row
+    for fold, (_, test_index) in enumerate(skf.split(remaining_df, remaining_df['speciesKey'])):
+        if fold == 0:
+            df.loc[remaining_df.index[test_index], 'set'] = 'test_in'
+        else:
+            df.loc[remaining_df.index[test_index], 'set'] = str(fold-1)
+    
+    # Save back the file
+    df.to_parquet(occurrences, engine='pyarrow', compression='gzip')
 
 def postprocessing(config, img_dir, occurrences):
     # Check and remove corrupted files
@@ -570,9 +634,10 @@ def postprocessing(config, img_dir, occurrences):
     remove_empty_folders(img_dir)
 
     # Updates the occurrence file
-    occurrences = remove_nonexistent_files(pd.read_parquet(occurrences), img_dir)
+    remove_nonexistent_files(occurrences, img_dir)
 
-    return occurrences
+    # Add cross-validation column
+    add_set_column(config, occurrences)
 
 # -----------------------------------------------------------------------------
 # Config
@@ -599,20 +664,19 @@ def main():
 
     # Download the occurrence file generated by GBIF
     # occurrences_path = download_occurrences(config, download_key=download_key)
-    # occurrences_path = Path("/home/george/codes/gbif-request/data/classif/mini/0013397-241007104925546.zip")
+    occurrences_path = Path("/home/george/codes/gbif-request/data/classif/mini/0013397-241007104925546.zip")
 
     # Preprocess the occurrence file
-    # preprocessed_occurrences = preprocess_occurrences(config, occurrences_path)
-    preprocessed_occurrences = Path("/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546.parquet")
+    preprocessed_occurrences = preprocess_occurrences(config, occurrences_path)
+    # preprocessed_occurrences = Path("/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546.parquet")
 
 
     # Download the images
-    # img_dir = download(config, preprocessed_occurrences)
-    img_dir = Path("/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546/images")
+    img_dir = download(config, preprocessed_occurrences)
+    # img_dir = Path("/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546/images")
 
     # Clean the downloaded dataset
-    occurrencess = postprocessing(config, img_dir, preprocessed_occurrences)
-
+    postprocessing(config, img_dir, preprocessed_occurrences)
 
 
 # -----------------------------------------------------------------------------
