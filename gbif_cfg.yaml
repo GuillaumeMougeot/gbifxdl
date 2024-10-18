@@ -1,10 +1,10 @@
-payload: payload.json
-format: dwca
-dataset_dir: data/classif/mini
-max_img_spc: 500
-num_threads: 100 # Number of thread for mutlithreaded download
-remove_corrupted: false # Remove corrupted images
+payload: payload.json # Occurence API request
+format: dwca # Only dwca format accepted for now
+dataset_dir: data/classif/mini # Where the occurence file and the images will be downloaded
+max_img_spc: 500 # Maximum number of images per species
+num_threads: 100 # Number of thread for mutlithreaded download and post-processing computations
+remove_corrupted: true # Remove corrupted images
 remove_duplicates: true # Remove image duplicates
-add_cv_col: true
+add_cv_col: true # Whether to add a column in the final occurrence file for cross-validation
 ood_th: 5 # Maximum number of images per species for it to be considered OOD
 seed: 42 # Random seed

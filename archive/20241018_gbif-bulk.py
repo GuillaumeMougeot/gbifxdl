@@ -696,7 +696,7 @@ def main():
     # img_dir = Path("/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546/images")
 
     # Clean the downloaded dataset
-    # postprocessing(config, img_dir, preprocessed_occurrences)
+    postprocessing(config, img_dir, preprocessed_occurrences)
 
 
 # -----------------------------------------------------------------------------
