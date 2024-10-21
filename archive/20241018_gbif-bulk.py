@@ -254,27 +254,13 @@ def preprocess_occurrences(config, occurrences_path: Path):
 # -----------------------------------------------------------------------------
 # Download the images using the prepared download file
 
-def check_and_hash_image(image_path):
-    """
-    Check if the image at image_path is corrupted and hash the image to remove duplicates later.
-    Returns True if the image is corrupted, False otherwise.
-    """
-    try:
-        with Image.open(image_path) as img:
-            img.verify()  # Verify that it is, in fact, an image
-            img = img.convert('RGB')  # Ensure consistency
-            img_bytes = img.tobytes()
-            return image_path, hashlib.sha256(img_bytes).hexdigest()
-    except (IOError, SyntaxError, PIL.UnidentifiedImageError, Image.DecompressionBombError) as e:
-        return None, None
-
 def get_one_img(
         occ,
         output_path: Path,
         logger: logging.Logger,
         num_attempts=0,
         sleep=5,
-        max_num_attempts=5,
+        max_num_attempts=10,
         verbose=False,
         ):
     """Put image located in `url` and stored in a specific `format` to the
@@ -345,8 +331,8 @@ def get_one_img(
                 handler.write(response.content)
             
             # Check if the image is corrupted
-            return check_and_hash_image(img_path)
-            # return img_name
+            # return check_and_hash_image(img_path)
+            return img_name
     except Exception as e:
         if num_attempts > max_num_attempts:
             logger.info(f"Reached maximum number of attempts for occurence {occ}. Skipping it.")
@@ -403,13 +389,10 @@ def download(config, preprocessed_occurrences: Path, verbose=False):
 
     print("Downloading the images...")
     results = thread_map(get_img, occs, max_workers=config['num_threads'])
-    img_names = [x[0] for x in results]
-    img_hashes = [x[1] for x in results]
     print(f"Download done. Downloaded images can be found in {output_path} and download logs in {log_filename}.")
 
     # TODO: Updates occurrence file by adding the filenames
-    df['filename'] = img_names
-    df['sha256'] = img_hashes
+    df['filename'] = results
     df.to_parquet(preprocessed_occurrences, engine='pyarrow', compression='gzip')
     print("Updated occurrence file to integrate the image filenames.")
     return output_path
@@ -504,7 +487,6 @@ def check_corrupted(config, img_dir: Path):
     else:
         print("No corrupted images found.")
 
-# TO TEST:
 def hash_image(image_path):
     """Hashes the image using SHA-256 and returns the hash and the image path."""
     try:
@@ -590,7 +572,7 @@ def remove_nonexistent_files(occurrences, img_dir):
     df_filtered = df[df['filename'].isin(file_set)].copy()
 
     # Final check if the number of images corresponds to the length of the occurrence file
-    assert len(df_filtered)==len(file_set), f"{len(df)}!={len(file_set)}"
+    assert len(df_filtered)==len(file_set), f"{len(df_filtered)}!={len(file_set)}"
 
     # Save back the file
     df_filtered.to_parquet(occurrences, engine='pyarrow', compression='gzip')
