@@ -1,6 +1,7 @@
 payload: payload.json # Occurence API request
 format: dwca # Only dwca format accepted for now
 dataset_dir: data/classif/mini # Where the occurence file and the images will be downloaded
+remote_dir: sftp://erda/datasets/test3
 max_img_spc: 500 # Maximum number of images per species
 num_threads: 100 # Number of thread for mutlithreaded download and post-processing computations
 remove_corrupted: true # Remove corrupted images

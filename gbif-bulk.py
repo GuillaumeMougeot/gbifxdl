@@ -6,7 +6,7 @@ from omegaconf import OmegaConf
 import os
 from os.path import join
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pyarrow.parquet as pq
 import pyarrow.csv as csv
@@ -25,10 +25,22 @@ import sys
 import PIL
 from abc import abstractmethod
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from PIL import Image
 
 from sklearn.model_selection import StratifiedKFold
+
+from pyremotedata.implicit_mount import IOHandler
+import concurrent.futures
+import threading
+import subprocess
+import queue
+
+from urllib.parse import urlparse, unquote
+
+# Queue to hold downloaded files to be uploaded
+UPLOAD_QUEUE = queue.Queue()
+
 
 # -----------------------------------------------------------------------------
 # Use the Occurence API to get a download file with image URLs
@@ -255,23 +267,39 @@ def preprocess_occurrences(config, occurrences_path: Path):
 # -----------------------------------------------------------------------------
 # Download the images using the prepared download file
 
-class FileManager:
-    @abstractmethod
-    def save(img, img_path):
-        pass 
+# class ImageManager:
+#     @abstractmethod
+#     def save(self, img, img_path):
+#         pass 
 
-    @abstractmethod
-    def remove(img_path):
-        pass 
+#     @abstractmethod
+#     def remove(self, img_path):
+#         pass 
 
-class LocalFileManager(FileManager):
-    def save(img, img_path):
-        with open(img_path, 'wb') as handler:
-            handler.write(img)
+# class LocalImageManager(ImageManager):
+#     def __init__(self, dataset_dir):
+#         self.dataset_dir = dataset_dir
+
+#     def save(self, img, img_path):
+#         abs_img_path = join(self.dataset_dir, img_path)
+#         with open(abs_img_path, 'wb') as handler:
+#             handler.write(img)
     
-    def remove(img_path):
-        if os.path.exists(img_path):
-            os.remove(img_path)
+#     def remove(self, img_path):
+#         abs_img_path = join(self.dataset_dir, img_path)
+#         if os.path.exists(abs_img_path):
+#             os.remove(abs_img_path)
+
+# class RemoteImageManager(ImageManager):
+#     def __init__(self, dataset_dir, remote_dir):
+#         o = urlparse(remote_dir)
+#         remote_dir = Path(o.path)
+#         sftp_server = f"{o.scheme}://{o.netloc}"
+#         self.sftp_server = sftp_server
+
+#         self.dataset_dir = dataset_dir
+
+#     def put(self, local_img_path, img_dir)
 
 def get_one_img(
         occ,
@@ -281,6 +309,7 @@ def get_one_img(
         num_attempts=0,
         sleep=5,
         max_num_attempts=5,
+        do_upload=False,
         verbose=False,
         ):
     """Put image located in `url` and stored in a specific `format` to the
@@ -341,11 +370,12 @@ def get_one_img(
             # if species == pd.NA: 
             #     logger.info("Invalid species key {}.".format(species))
             #     return
-            img_dir = output_path / str(int(species))
-            img_path = img_dir / img_name
+            img_dir = Path(str(int(species)))
+            img_local_dir = output_path / img_dir
+            img_path = img_local_dir / img_name
 
             # Create dir and dl image
-            os.makedirs(img_dir, exist_ok=True)
+            os.makedirs(img_local_dir, exist_ok=True)
 
             # Store the image
             # filemanager.save(response.content, img_path)
@@ -368,6 +398,10 @@ def get_one_img(
             with Image.open(img_path) as img:
                 img = img.convert('RGB')  # Ensure consistency
                 img_hash = hashlib.sha256(img.tobytes()).hexdigest()
+
+            # Upload on ERDA
+            if do_upload:
+                UPLOAD_QUEUE.put((img_dir, img_path))
             return img_name, img_hash
             # return check_and_hash_image(img_path)
             # return img_name
@@ -400,6 +434,36 @@ def set_logger(log_dir=Path("."), suffix=""):
         )
     return logger, filename
 
+# Function to upload an image to the lftp server
+def upload_image(logger, sftp_server, remote_dir):
+    while True:
+        item = UPLOAD_QUEUE.get()  # Blocks until an item is available
+        if item is None:
+            # Sentinel to break the loop
+            break
+            
+        img_dir, img_path = item
+        img_name = img_path.name
+        
+        try:
+            # o = urlparse(remote_dir)
+            # remote_dir = Path(o.path)
+            remote_img_dir = remote_dir / img_dir
+            remote_img_path = remote_img_dir / img_name
+            # stfp_server = 'sftp://erda'
+            # stfp_server = f"{o.scheme}://{o.netloc}"
+            lftp_command = f'lftp -e "open {sftp_server}; mkdir -p {remote_img_dir}; put {img_path} -o {remote_img_path}; bye"'
+            # lftp_command = f'lftp -e "open {stfp_server}; put {img_path} -o {remote_img_path}; bye"'
+            result = subprocess.run(lftp_command, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            print(f"Uploaded {img_name} to server successfully.")
+            # Clean up local file after successful upload
+            os.remove(img_path)
+            print(f"Deleted local file: {img_path}")
+        except subprocess.CalledProcessError as e:
+            logger.info(f"Failed to upload {img_name}: {e.stderr.decode()}")
+        finally:
+            UPLOAD_QUEUE.task_done()
+
 def download(config, preprocessed_occurrences: Path, verbose=False):
     """Download the images with multi-threading. Adds the image filenames in preprocessed_occurrences.
 
@@ -408,6 +472,13 @@ def download(config, preprocessed_occurrences: Path, verbose=False):
     Output folder is dataset_dir / images.
     Output a .log file
     """
+    print("Downloading the images...")
+    do_upload = 'remote_dir' in config.keys() and config['remote_dir'] is not None
+
+    if do_upload:
+        print(f"A remote directory has been defined. Will attempt to upload data to {config['remote_dir']}. Local data will be removed while downloading.")
+
+    datasets_dir = Path(config['dataset_dir'])
 
     df = pd.read_parquet(preprocessed_occurrences)
     # TMP, DEBUG
@@ -415,17 +486,54 @@ def download(config, preprocessed_occurrences: Path, verbose=False):
     occs = [(row.identifier, row.format, row.speciesKey) for row in df.itertuples(index=False)]
 
     # Output path
-    output_path = Path(config['dataset_dir'])  / 'images'
+    # output_path = Path(config['dataset_dir'])  / 'images'
+    output_path = datasets_dir  / 'images'
     os.makedirs(output_path, exist_ok=True)
 
     # Logger
-    log_dir = Path(config['dataset_dir']) 
+    log_dir = datasets_dir
     logger, log_filename = set_logger(log_dir, "_download")
 
-    get_img = partial(get_one_img, output_path=output_path, logger=logger)
+    get_img = partial(get_one_img, output_path=output_path, logger=logger, do_upload=do_upload)
+    if do_upload:
+        o = urlparse(config['remote_dir'])
+        remote_dir = Path(o.path)
+        sftp_server = f"{o.scheme}://{o.netloc}"
+        upload = partial(upload_image, logger=logger, sftp_server=sftp_server, remote_dir=remote_dir)
 
-    print("Downloading the images...")
-    results = thread_map(get_img, occs, max_workers=config['num_threads'])
+    max_workers = config['num_threads']
+    results = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Create a pool of downloaders
+        download_futures = [executor.submit(get_img, occ) for occ in occs]
+
+        # Collect the results from the completed download tasks
+        for future in as_completed(download_futures):
+            result = future.result()  # This is (image_name, image_hash) tuple
+            if result is not None:
+                results.append(result)  # Add it to the list
+
+        # Start a few threads for uploading files
+        if do_upload:
+            upload_threads = []
+            for _ in range(max_workers):
+                t = threading.Thread(target=upload)
+                t.start()
+                upload_threads.append(t)
+        
+        # Wait for all download threads to complete
+        wait(download_futures)
+
+        if do_upload:
+            # Signal the uploader threads to stop by adding a sentinel (None) to the queue
+            for _ in upload_threads:
+                UPLOAD_QUEUE.put(None)
+            
+            # Wait for all upload threads to finish
+            for t in upload_threads:
+                t.join()
+
+    # results = thread_map(get_img, occs, max_workers=config['num_threads'])
     img_names = [x[0] for x in results]
     img_hashes = [x[1] for x in results]
     print(f"Download done. Downloaded images can be found in {output_path} and download logs in {log_filename}.")
@@ -445,14 +553,14 @@ def download(config, preprocessed_occurrences: Path, verbose=False):
 # - update the occurrence file
 # - add a column for cross-validation
 
-def remove_nonexistent_files(occurrences: Path, img_dir):
+def dropna(occurrences: Path):
     """Remove None rows in the dictionary.
     """
     df = pd.read_parquet(occurrences)
     df = df.dropna(subset='filename')
     df.to_parquet(occurrences, engine='pyarrow', compression='gzip')
 
-def check_duplicates(config, img_dir: Path, occurrences: Path):
+def check_duplicates(config, occurrences: Path):
     """Finds and removes original and duplicate images if they are in different subfolders."""
 
     print("Checking for duplicates...")
@@ -460,24 +568,55 @@ def check_duplicates(config, img_dir: Path, occurrences: Path):
     df = pd.read_parquet(occurrences)
     removed_files = []
 
-    # Function to process duplicates based on heuristic
-    def process_duplicates(group):
-        if group['speciesKey'].nunique() == 1:
-            # Only one speciesKey, keep one row, delete the duplicates' files
-            for index, row in group.iloc[1:].iterrows():  # Keep the first row, delete the rest
+    do_remote = 'remote_dir' in config.keys() and config['remote_dir'] is not None
+    # if do_remote:
+    #     o = urlparse(config['remote_dir'])
+    #     remote_dir = Path(o.path)
+    #     sftp_server = f"{o.scheme}://{o.netloc}"
+    # else:
+    img_dir = Path(config['dataset_dir']) / 'images'
+
+    def remove_files(group):
+        for index, row in group.iterrows():
+            if do_remote:
+                file_path = config['remote_dir'] + "/" + str(row['speciesKey']) + "/" + row['filename']
+                lftp_command = f'lftp -c rm {file_path}'
+                print(f"Removed {file_path}")
+                # lftp_command = f'lftp -e "open {stfp_server}; put {img_path} -o {remote_img_path}; bye"'
+                result = subprocess.run(lftp_command, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            else:
                 file_path = img_dir/Path(str(row['speciesKey']))/Path(row['filename'])
                 if config['remove_duplicates'] and os.path.exists(file_path):
                     os.remove(file_path)
-                removed_files.append(file_path)
+            removed_files.append(file_path)
+
+    # Function to process duplicates based on heuristic
+    def process_duplicates(group):
+        if group['speciesKey'].nunique() == 1:
+            remove_files(group.iloc[1:]) 
+            # # Only one speciesKey, keep one row, delete the duplicates' files
+            # for index, row in group.iloc[1:].iterrows():  # Keep the first row, delete the rest
+            #     if do_remote:
+            #         file_path = config['remote_dir'] + "/" + str(row['speciesKey']) + "/" + row['filename']
+            #         lftp_command = f'lftp -c rm {file_path}'
+            #         print(f"Removed {file_path}")
+            #         # lftp_command = f'lftp -e "open {stfp_server}; put {img_path} -o {remote_img_path}; bye"'
+            #         result = subprocess.run(lftp_command, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            #     else:
+            #         file_path = img_dir/Path(str(row['speciesKey']))/Path(row['filename'])
+            #         if config['remove_duplicates'] and os.path.exists(file_path):
+            #             os.remove(file_path)
+            #     removed_files.append(file_path)
             return group.iloc[:1]  # Keep only the first row
         
         else:
             # Multiple speciesKey, remove all rows and delete associated files
-            for index, row in group.iterrows():
-                file_path = img_dir/Path(str(row['speciesKey']))/Path(row['filename'])
-                if config['remove_duplicates'] and os.path.exists(file_path):
-                    os.remove(file_path)
-                removed_files.append(file_path)
+            remove_files(group)
+            # for index, row in group.iterrows():
+            #     file_path = img_dir/Path(str(row['speciesKey']))/Path(row['filename'])
+            #     if config['remove_duplicates'] and os.path.exists(file_path):
+            #         os.remove(file_path)
+            #     removed_files.append(file_path)
             
             # Return an empty DataFrame for this group
             return pd.DataFrame(columns=group.columns)
@@ -490,9 +629,11 @@ def check_duplicates(config, img_dir: Path, occurrences: Path):
 
     print(f"{len(removed_files)} duplicates were removed.")
 
-def remove_empty_folders(path):
+def remove_empty_folders(config):
+    img_dir = Path(config['dataset_dir']) / 'images'
+
     # Iterate through all the subdirectories and files recursively
-    for foldername, subfolders, filenames in os.walk(path, topdown=False):
+    for foldername, subfolders, filenames in os.walk(img_dir, topdown=False):
         # Check if the folder is empty (no files and no subfolders)
         if not subfolders and not filenames:
             try:
@@ -513,9 +654,10 @@ def get_image_paths(folder):
                 image_paths.append(os.path.join(root, file))
     return image_paths
 
-def check_integrity(occurrences, img_dir):
+def check_integrity(config, occurrences):
     """Check if there are as many rows in occurrences as images in img_dir.
     """
+    img_dir = Path(config['dataset_dir']) / 'images'
     df = pd.read_parquet(occurrences)
     paths = get_image_paths(img_dir)
     assert len(df)==len(paths), f"{len(df)}!={len(paths)}"
@@ -568,22 +710,22 @@ def add_set_column(config, occurrences):
     # Save back the file
     df.to_parquet(occurrences, engine='pyarrow', compression='gzip')
 
-def postprocessing(config, img_dir, occurrences):
+def postprocessing(config, occurrences):
     # Remove None images listed in occurrences (corrupted files, etc.)
     # Updates the occurrence file
-    remove_nonexistent_files(occurrences, img_dir)
+    dropna(occurrences)
 
     # Check and remove corrupted files
     # check_corrupted(config, img_dir)
 
     # Check and remove duplicates
-    check_duplicates(config, img_dir, occurrences)
+    check_duplicates(config, occurrences)
 
     # Remove empty folders
-    remove_empty_folders(img_dir)
+    remove_empty_folders(config)
 
     # Check if there are as many files as there are rows in the dataframe
-    check_integrity(occurrences, img_dir)
+    # check_integrity(occurrences, img_dir)
 
     # Add cross-validation column
     if config['add_cv_col']:
@@ -622,11 +764,11 @@ def main():
 
 
     # Download the images
-    img_dir = download(config, preprocessed_occurrences)
+    download(config, preprocessed_occurrences)
     # img_dir = Path("/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546/images")
 
     # Clean the downloaded dataset
-    postprocessing(config, img_dir, preprocessed_occurrences)
+    postprocessing(config, preprocessed_occurrences)
 
 
 # -----------------------------------------------------------------------------
