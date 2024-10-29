@@ -64,4 +64,34 @@ except:
     pass
 print("DEF")
 
+# TO TEST
+import os
+
+from pyremotedata.implicit_mount import IOHandler
+# from concurrent.futures import ThreadPoolExecutor
+from tqdm.contrib.concurrent import thread_map
+from threading import Lock
+
+directory = "/home/altair/flat-bug/dev/reference"
+files = [os.path.join(directory, f) for f in os.listdir(directory)]
+lock = Lock()
+i = 0
+
+def upload_files(files):
+    with IOHandler(clean=True) as io:
+        io.cd("testing/prd")
+
+        for file in files:
+            this_dir = os.path.basename(file).split("_")[0]
+            io.execute_command(f"mkdir -f {this_dir}")
+            io.cd(this_dir)
+            io.put(file)
+            io.cd("..")
+
+N = 100
+chunks = [list() for _ in range(N)]
+for i, f in enumerate(files):
+    chunks[i % N].append(f)
+
+thread_map(upload_files, chunks, max_workers=10)
 

@@ -30,11 +30,14 @@ from PIL import Image
 
 from sklearn.model_selection import StratifiedKFold
 
+# WARNING: IOHandler must be configured interactively for the first time
 from pyremotedata.implicit_mount import IOHandler
 import concurrent.futures
 import threading
 import subprocess
 import queue
+from queue import Queue, Full
+import shutil
 
 from urllib.parse import urlparse, unquote
 
@@ -299,7 +302,370 @@ def preprocess_occurrences(config, occurrences_path: Path):
 
 #         self.dataset_dir = dataset_dir
 
+
+class FileManager:
+    def __init__(self, config: dict, occurrences_path: Path):
+        self.do_upload = 'remote_dir' in config.keys() and config['remote_dir'] is not None
+        self.num_download_threads = config['num_threads']
+        self.occurrences_path = occurrences_path
+        self.df = pd.read_parquet(self.occurrences_path)
+
+        # Get all occurrences urls, formats, speciesKey
+        self.occs = [(row.identifier, row.format, row.speciesKey) for row in self.df.itertuples(index=False)]
+        self.num_files = len(self.occs)
+
+        self.download_threads = []
+        self.dataset_dir = Path(config['dataset_dir'])
+
+        # Max number of attempts before given up a download
+        self.max_num_attempts = 5
+
+        # Dir for storing the images locally
+        # Removed after upload, if do_upload
+        self.output_path = self.dataset_dir / 'images'
+        os.makedirs(self.output_path, exist_ok=True)
+
+        # Logger
+        self.logger, log_filename = set_logger(self.dataset_dir, "_download")
+
+        # Stores the image names and hashes
+        self.img_names = []
+        self.img_hashes = []
+
+        # Display a counter
+        self.downloaded_count = 0
+        self.lock = threading.Lock()  # Lock to synchronize counter updates and display
+
+        if self.do_upload:
+            self.upload_threads = []
+            self.num_upload_threads = config['num_threads']
+            self.remote_dir = config['remote_dir']
+
+            # Parse the remote url to get the server name and the remote path
+            o = urlparse(self.remote_dir)
+            self.remote_dir = Path(o.path)
+            self.netloc = o.netloc
+            # self.user, self.server = o.netloc.split(':@')
+
+            self.sftp_server = f"{o.scheme}://{o.netloc}"
+
+            # Make root dataset dir
+            with IOHandler(local_dir=self.output_path, verbose=False) as io:
+                io.execute_command(f"mkdir -fp {self.remote_dir}")
+
+            # Queue to hold downloaded files for uploading
+            # Set a maxsize to the queue to avoid downloading the whole dataset locally if the uploader 
+            # cannot keep up with the downloader
+            self.file_queue = Queue(maxsize=10)
+
+            self.uploaded_count = 0
+    
+    def _download_one_file(self, occ, num_attempts=0, sleep=5):
+        url, format, species = occ
+        # default_return = (None,None, (None, None))
+        default_return = (None, None)
+        try:
+            # with requests.get(url, stream=True) as response:
+            headers = {'User-Agent': 'Wget/1.21.2 Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/56.0.2924.87 Safari/537.36',}
+            with requests.get(url, headers=headers) as response:
+            # with requests.get(url, allow_redirects=False) as response:
+
+                if response.status_code == 429:
+                    self.logger.info(f"429 Too many requests for {occ}. Waiting {sleep} and reattempting.")
+                    if num_attempts > self.max_num_attempts:
+                        self.logger.info(f"Reached maximum number of attempts for occurence {occ}. Skipping it.")
+                        return default_return
+                    else:
+                        if 'Retry-After' in response.headers:
+                            sleep429 = int(response.headers["Retry-After"])
+                        else:
+                            sleep429 = sleep
+                        time.sleep(sleep429)
+                        return self._download_one_file(occ, sleep=min(sleep429*2,20), num_attempts=num_attempts+1)
+                elif response.status_code == 502 or response.status_code == 503:
+                    self.logger.info(f"{response.status_code} for {occ}. Waiting {sleep} and reattempting.")
+                    if num_attempts > self.max_num_attempts:
+                        self.logger.info(f"Reached maximum number of attempts for occurence {occ}. Skipping it.")
+                        return default_return
+                    else:
+                        return self._download_one_file(occ, sleep=min(sleep*2,20), num_attempts=num_attempts+1)
+                elif response.status_code == 403:
+                    self.logger.info(f"403 Forbidden access for {occ}.")
+                    return default_return
+                elif response.status_code == 404:
+                    self.logger.info(f"404 Not found for {occ}.")
+                    return default_return
+                elif not response.ok:
+                    self.logger.info(response, occ)
+                    return default_return
+                
+                # Check image type
+                valid_format = ('image/png', 'image/jpeg', 'image/gif', 'image/jpg', 'image/tiff', 'image/tif')
+                if format not in valid_format:
+                    # Attempting to get it from the url
+                    if response.headers['content-type'].lower() not in valid_format:
+                        self.logger.info("Invalid image type {} (in csv) and {} (in content-type) for url {}.".format(format, response.headers['content-type'], url))
+                        return default_return
+                    else:
+                        format = response.headers['content-type'].lower()
+                
+                # Get image name by hashing
+                ext = "." + format.split("/")[1]
+                basename = hashlib.sha1(url.encode("utf-8")).hexdigest()
+                img_name = basename + ext
+
+                # Create image output path
+                # if species == pd.NA: 
+                #     self.logger.info("Invalid species key {}.".format(species))
+                #     return
+                img_dir = Path(str(int(species)))
+                img_local_dir = self.output_path / img_dir
+                img_path = img_local_dir / img_name
+
+                # Create dir and dl image
+                os.makedirs(img_local_dir, exist_ok=True)
+
+                # Store the image
+                # filemanager.save(response.content, img_path)
+                with open(img_path, 'wb') as handler:
+                    handler.write(response.content)
+                
+                # Check if the image is corrupted
+                try:
+                    with Image.open(img_path) as img:
+                        img.verify()  # Verify that it is, in fact, an image
+                except (IOError, SyntaxError, PIL.UnidentifiedImageError, Image.DecompressionBombError) as e:
+                    if num_attempts > self.max_num_attempts:
+                        self.logger.info(f"Image {img_path} is corrupted, failed to download.")
+                        return default_return
+                    # retry once to download if it is the case
+                    self.logger.info(f"Image {img_path} seems corrupted, retrying to download...")
+                    return self._download_one_file(occ, sleep=sleep, num_attempts=num_attempts+1)
+                
+                # Hash the image and return both the image and the hash
+                with Image.open(img_path) as img:
+                    img = img.convert('RGB')  # Ensure consistency
+                    img_hash = hashlib.sha256(img.tobytes()).hexdigest()
+
+                # Upload on ERDA
+                if self.do_upload:
+                    # self.file_queue.put((img_dir, img_path))
+                    try:
+                        self.file_queue.put(img_path)
+                    except Full:
+                        time.sleep(sleep)
+                # if upload_fn is not None:
+                #     upload_fn((img_dir, img_path))
+                return img_name, img_hash
+                # return img_name, img_hash, (img_dir, img_path)
+                # return check_and_hash_image(img_path)
+                # return img_name
+        except Exception as e:
+            if num_attempts > self.max_num_attempts:
+                self.logger.info(f"Reached maximum number of attempts for occurence {occ}. Skipping it.")
+                return default_return
+            else:
+                self.logger.info(f"Unknown error: {e}, for URL {url}. Waiting {sleep} secondes and reattempting.")
+                time.sleep(sleep)
+                return self._download_one_file(occ, sleep=sleep, num_attempts=num_attempts+1)
+
+    def _display_progress(self):
+        """Display the progress of download and upload in one line."""
+        with self.lock:
+            progress = f"\rDownloaded: {self.downloaded_count}/{self.num_files}"
+            if self.do_upload:
+                progress += f" | Uploaded: {self.uploaded_count}/{self.num_files}"
+            sys.stdout.write(progress)
+            sys.stdout.flush()
+
+    def _download_files_with_one_thread(self, thread_id):
+        for occ in self.occs[thread_id::self.num_download_threads]:
+            img_name, img_hash = self._download_one_file(occ)
+
+            self.img_names.append(img_name)
+            self.img_hashes.append(img_hash)
+
+            with self.lock:
+                self.downloaded_count += 1
+            self._display_progress()
+
+            # Add file to queue if remote
+            # if self.do_upload:
+            #     self.file_queue.put(upload_input)
+        if self.do_upload:
+            self.file_queue.put(None)
+
+    def _upload_files_with_one_thread_v1(self):
+        """Upload function for upload threads."""
+        with IOHandler(local_dir=self.output_path, verbose=False) as io:
+            io.cd(self.remote_dir)
+            while True:
+                try:
+                    file = self.file_queue.get()  # Retrieve file from the queue
+                    if file is None:  # Check for sentinel value
+                        # Put the sentinel back for other threads and exit loop
+                        self.file_queue.put(None)
+                        break
+                    
+                    # Upload
+                    img_dir = file.parent.name
+                    img_name = file.name
+                    remote_img_path = self.remote_dir / img_dir / img_name
+                    io.execute_command(f"mkdir -fp {img_dir}")
+                    io.put(join(img_dir, img_name), str(remote_img_path))
+
+                    # Remove local file 
+                    os.remove(file)
+
+                    with self.lock:
+                        self.uploaded_count += 1
+                    self._display_progress()
+
+                    self.file_queue.task_done()  # Mark file as processed
+                except Exception as e:
+                    self.logger.info(f"Failed to upload {file}: {e}")
+    
+    def _upload_files_with_one_thread(self):
+        """Upload function for upload threads."""
+        # with IOHandler(local_dir=self.output_path, verbose=False) as io:
+            # io.cd(self.remote_dir)
+        try:
+            lftp_command = f'lftp -e "open {self.sftp_server}"'
+            process = subprocess.Popen(lftp_command, shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            while True:
+                file = self.file_queue.get()  # Retrieve file from the queue
+                if file is None:  # Check for sentinel value
+                    # Put the sentinel back for other threads and exit loop
+                    self.file_queue.put(None)
+                    break
+                
+                # Upload
+                img_dir = file.parent.name
+                img_name = file.name
+                remote_img_dir = self.remote_dir / img_dir
+                remote_img_path = self.remote_dir / img_dir / img_name
+                # io.execute_command(f"mkdir -fp {img_dir}")
+                # io.put(join(img_dir, img_name), str(remote_img_path))
+
+                # lftp_command = f'lftp -e "open {self.sftp_server}; mkdir -p {remote_img_dir}; put {file} -o {remote_img_path}; bye"'
+                # # lftp_command = f'lftp -e "open {stfp_server}; put {img_path} -o {remote_img_path}; bye"'
+                # result = subprocess.run(lftp_command, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                # Prepare commands for lftp
+                upload_command = f"mkdir -p {remote_img_dir}; put {file} -o {remote_img_path};"
+                process.stdin.write(upload_command + "\n")
+
+                # Remove local file 
+                os.remove(file)
+
+                with self.lock:
+                    self.uploaded_count += 1
+                self._display_progress()
+
+                self.file_queue.task_done()  # Mark file as processed
+
+            process.stdin.write("bye\n")  # Close the lftp session
+            process.stdin.close()
+            process.wait()  # Wait for the process to finish
+        except Exception as e:
+            self.logger.info(f"Failed to upload: {e}")
+        # finally:
+        #     if process is not None:
+        #         process.stdin.write("bye\n")  # Close the lftp session
+        #         process.stdin.close()
+        #         process.wait()  # Wait for the process to finish
+
+    def _monitor_upload_threads(self):
+        """Monitor upload threads and restart if needed."""
+        while True:
+            time.sleep(5)  # Check every few seconds
+            for thread in self.upload_threads:
+                if not thread.is_alive():
+                    self.logger.info(f"Thread {thread.name} is dead.")
+
+                    self.logger.info(f"Restarting {thread.name} due to inactivity.")
+                    # Logic to restart the thread, if needed
+                    new_thread = threading.Thread(target=self._upload_files_with_one_thread, name=thread.name)
+                    new_thread.start()
+                    self.upload_threads.remove(thread)
+                    self.upload_threads.append(new_thread)
+
+    def transfer_files(self):
+        """Initialize and start download and upload threads."""
+        # Create and start download threads
+        self.download_threads = [
+            threading.Thread(target=self._download_files_with_one_thread, args=(i,), name=f"Downloader-{i}")
+            for i in range(self.num_download_threads)
+        ]
+        for thread in self.download_threads:
+            thread.start()
+
+        # Create and start upload threads
+        if self.do_upload:
+            # Start the monitor thread
+            monitor_thread = threading.Thread(target=self._monitor_upload_threads)
+            monitor_thread.start()
+
+            self.upload_threads = [
+                # threading.Thread(target=self.upload_files, args=(i,), name=f"Uploader-{i}")
+                threading.Thread(target=self._upload_files_with_one_thread, name=f"Uploader-{i}")
+                for i in range(self.num_upload_threads)
+            ]
+            for thread in self.upload_threads:
+                thread.start()
+
+        # Wait for all download threads to finish
+        for thread in self.download_threads:
+            thread.join()
+
+        if self.do_upload:
+            # Wait for all items in the queue to be processed
+            self.file_queue.join()
+            monitor_thread.join()
+
+            # Wait for all upload threads to finish
+            for thread in self.upload_threads:
+                thread.join()
+
+        print("All files have been downloaded and uploaded.")
+
+        # Add images names and hashes in the df
+        self.df['filename'] = self.img_names
+        self.df['sha256'] = self.img_hashes
+        self.df.to_parquet(self.occurrences_path, engine='pyarrow', compression='gzip')
+
+        print("Updated occurrence file to integrate the image filenames.")
+
 #     def put(self, local_img_path, img_dir)
+# Function to upload an image to the lftp server
+def upload_one_img(item, logger, sftp_server, remote_dir, io: IOHandler):
+            
+    img_dir, img_path = item
+    
+    if img_dir is not None and img_path is not None:
+        img_name = img_path.name
+        try:
+            # o = urlparse(remote_dir)
+            # remote_dir = Path(o.path)
+            remote_img_dir = remote_dir / img_dir
+            remote_img_path = remote_img_dir / img_name
+            # stfp_server = 'sftp://erda'
+            # stfp_server = f"{o.scheme}://{o.netloc}"
+
+            # lftp_command = f'lftp -e "open {sftp_server}; mkdir -p {remote_img_dir}; put {img_path} -o {remote_img_path}; bye"'
+            # lftp_command = f'lftp -e "open {stfp_server}; put {img_path} -o {remote_img_path}; bye"'
+            # result = subprocess.run(lftp_command, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            # io.put(str(img_path), str(remote_img_path))
+
+            # cmd = f"mkdir -p {remote_img_dir}; put {Path(img_dir)/img_name} -o {remote_img_path}"
+            cmd = f"put {Path(img_dir)/img_name} -o {remote_img_path}"
+            io.execute_command(cmd)
+
+            # print(f"Uploaded {img_name} to server successfully.")
+            # Clean up local file after successful upload
+            os.remove(img_path)
+            # print(f"Deleted local file: {img_path}")
+        except subprocess.CalledProcessError as e:
+            logger.info(f"Failed to upload {img_name}: {e}")
 
 def get_one_img(
         occ,
@@ -310,6 +676,7 @@ def get_one_img(
         sleep=5,
         max_num_attempts=5,
         do_upload=False,
+        upload_fn = None,
         verbose=False,
         ):
     """Put image located in `url` and stored in a specific `format` to the
@@ -317,10 +684,12 @@ def get_one_img(
     """
     # TODO? Return the list of undownloaded file?
     url, format, species = occ
-    default_return = (None,None)
+    default_return = (None,None, (None, None))
     try:
         # with requests.get(url, stream=True) as response:
-        with requests.get(url) as response:
+        headers = {'User-Agent': 'Wget/1.21.2 Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/56.0.2924.87 Safari/537.36',}
+        with requests.get(url, headers=headers) as response:
+        # with requests.get(url, allow_redirects=False) as response:
 
             if response.status_code == 429:
                 logger.info(f"429 Too many requests for {occ}. Waiting {sleep} and reattempting.")
@@ -334,8 +703,8 @@ def get_one_img(
                         sleep429 = sleep
                     time.sleep(sleep429)
                     return get_one_img(occ, output_path, logger, sleep=min(sleep429*2,20), num_attempts=num_attempts+1)
-            elif response.status_code == 502:
-                logger.info(f"502 bad gateway for {occ}. Waiting {sleep} and reattempting.")
+            elif response.status_code == 502 or response.status_code == 503:
+                logger.info(f"{response.status_code} for {occ}. Waiting {sleep} and reattempting.")
                 if num_attempts > max_num_attempts:
                     logger.info(f"Reached maximum number of attempts for occurence {occ}. Skipping it.")
                     return default_return
@@ -400,9 +769,12 @@ def get_one_img(
                 img_hash = hashlib.sha256(img.tobytes()).hexdigest()
 
             # Upload on ERDA
-            if do_upload:
-                UPLOAD_QUEUE.put((img_dir, img_path))
-            return img_name, img_hash
+            # if do_upload:
+            #     UPLOAD_QUEUE.put((img_dir, img_path))
+            if upload_fn is not None:
+                upload_fn((img_dir, img_path))
+            # return img_name, img_hash
+            return img_name, img_hash, (img_dir, img_path)
             # return check_and_hash_image(img_path)
             # return img_name
     except Exception as e:
@@ -410,7 +782,7 @@ def get_one_img(
             logger.info(f"Reached maximum number of attempts for occurence {occ}. Skipping it.")
             return default_return
         else:
-            logger.info(f"Error: {e}. Waiting {sleep} secondes and reattempting.")
+            logger.info(f"Unknown error: {e}, for URL {url}. Waiting {sleep} secondes and reattempting.")
             time.sleep(sleep)
             return get_one_img(occ, output_path, logger, num_attempts=num_attempts+1)
 
@@ -482,7 +854,7 @@ def download(config, preprocessed_occurrences: Path, verbose=False):
 
     df = pd.read_parquet(preprocessed_occurrences)
     # TMP, DEBUG
-    # df = df[:10]
+    # df = df[:100]
     occs = [(row.identifier, row.format, row.speciesKey) for row in df.itertuples(index=False)]
 
     # Output path
@@ -494,48 +866,78 @@ def download(config, preprocessed_occurrences: Path, verbose=False):
     log_dir = datasets_dir
     logger, log_filename = set_logger(log_dir, "_download")
 
-    get_img = partial(get_one_img, output_path=output_path, logger=logger, do_upload=do_upload)
+    # get_img = partial(get_one_img, output_path=output_path, logger=logger, do_upload=do_upload)
+    # if do_upload:
+    #     o = urlparse(config['remote_dir'])
+    #     remote_dir = Path(o.path)
+    #     sftp_server = f"{o.scheme}://{o.netloc}"
+    #     upload = partial(upload_image, logger=logger, sftp_server=sftp_server, remote_dir=remote_dir)
+
+    # max_workers = config['num_threads']
+    # results = []
+    # with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    #     # Create a pool of downloaders
+    #     download_futures = [executor.submit(get_img, occ) for occ in occs]
+
+    #     # Collect the results from the completed download tasks
+    #     for future in as_completed(download_futures):
+    #         result = future.result()  # This is (image_name, image_hash) tuple
+    #         if result is not None:
+    #             results.append(result)  # Add it to the list
+
+    #     # Start a few threads for uploading files
+    #     if do_upload:
+    #         upload_threads = []
+    #         for _ in range(max_workers):
+    #             t = threading.Thread(target=upload)
+    #             t.start()
+    #             upload_threads.append(t)
+        
+    #     # Wait for all download threads to complete
+    #     wait(download_futures)
+
+    #     if do_upload:
+    #         # Signal the uploader threads to stop by adding a sentinel (None) to the queue
+    #         for _ in upload_threads:
+    #             UPLOAD_QUEUE.put(None)
+            
+    #         # Wait for all upload threads to finish
+    #         for t in upload_threads:
+    #             t.join()
+
     if do_upload:
         o = urlparse(config['remote_dir'])
         remote_dir = Path(o.path)
         sftp_server = f"{o.scheme}://{o.netloc}"
-        upload = partial(upload_image, logger=logger, sftp_server=sftp_server, remote_dir=remote_dir)
-
-    max_workers = config['num_threads']
-    results = []
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Create a pool of downloaders
-        download_futures = [executor.submit(get_img, occ) for occ in occs]
-
-        # Collect the results from the completed download tasks
-        for future in as_completed(download_futures):
-            result = future.result()  # This is (image_name, image_hash) tuple
-            if result is not None:
-                results.append(result)  # Add it to the list
-
-        # Start a few threads for uploading files
-        if do_upload:
-            upload_threads = []
-            for _ in range(max_workers):
-                t = threading.Thread(target=upload)
-                t.start()
-                upload_threads.append(t)
-        
-        # Wait for all download threads to complete
-        wait(download_futures)
-
-        if do_upload:
-            # Signal the uploader threads to stop by adding a sentinel (None) to the queue
-            for _ in upload_threads:
-                UPLOAD_QUEUE.put(None)
-            
-            # Wait for all upload threads to finish
-            for t in upload_threads:
-                t.join()
-
-    # results = thread_map(get_img, occs, max_workers=config['num_threads'])
+        io = IOHandler(local_dir=os.path.abspath(output_path))
+        io.__enter__()
+        upload_fn = partial(upload_one_img, logger=logger, sftp_server=sftp_server, remote_dir=remote_dir, io=io)
+    else:
+        upload_fn = None
+    # get_img = partial(get_one_img, output_path=output_path, logger=logger, upload_fn=upload_fn)
+    get_img = partial(get_one_img, output_path=output_path, logger=logger, upload_fn=None)
+    results = thread_map(get_img, occs, max_workers=config['num_threads'])
     img_names = [x[0] for x in results]
     img_hashes = [x[1] for x in results]
+
+    if do_upload:
+        print('Making species folders on remote server...')
+        species = df['speciesKey'].unique()
+        f = lambda folder: io.execute_command(f'mkdir -p {join(remote_dir, folder)}')
+        thread_map(f, species, max_workers=config['num_threads'])
+        print('Folders created')
+
+        logger.info("Start uploading...")
+        items = [x[2] for x in results]
+        thread_map(upload_fn, items, max_workers=config['num_threads'])
+        io.__exit__()
+        logger.info("Uploading done.")
+
+    # Remove local image directory, if upload
+    if do_upload:
+        # os.remove(output_path)
+        shutil.rmtree(output_path)
+
     print(f"Download done. Downloaded images can be found in {output_path} and download logs in {log_filename}.")
 
     # TODO: Updates occurrence file by adding the filenames
@@ -544,7 +946,6 @@ def download(config, preprocessed_occurrences: Path, verbose=False):
     df.to_parquet(preprocessed_occurrences, engine='pyarrow', compression='gzip')
 
     print("Updated occurrence file to integrate the image filenames.")
-    return output_path
 
 # -----------------------------------------------------------------------------
 # Clean the dataset 
@@ -764,7 +1165,9 @@ def main():
 
 
     # Download the images
-    download(config, preprocessed_occurrences)
+    # download(config, preprocessed_occurrences)
+    file_manager = FileManager(config, occurrences_path=preprocessed_occurrences)
+    file_manager.transfer_files()
     # img_dir = Path("/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546/images")
 
     # Clean the downloaded dataset
