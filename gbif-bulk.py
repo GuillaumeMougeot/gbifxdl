@@ -6,7 +6,7 @@ from omegaconf import OmegaConf
 import os
 from os.path import join
 import zipfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 import pyarrow.parquet as pq
 import pyarrow.csv as csv
@@ -41,8 +41,65 @@ import shutil
 
 from urllib.parse import urlparse, unquote
 
-# Queue to hold downloaded files to be uploaded
-UPLOAD_QUEUE = queue.Queue()
+import dask.dataframe as dd
+from dask import delayed
+
+import pyarrow as pa
+from collections import defaultdict
+
+import mmh3
+
+# -----------------------------------------------------------------------------
+# Logger
+
+def set_logger(log_dir=Path("."), suffix=""):
+    """Helper function to set up the logging process.
+
+    Parameters
+    ----------
+    log_dir : Path, default="."
+        Directory where the log file will be created.
+    suffix : str, default=""
+        Suffix to add at the end of the log file name.
+
+    Returns
+    -------
+    logger : logging.Logger
+        Configured logger instance.
+    filename : Path
+        Path to the created log file.
+    """
+    # Create a logger
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+
+    # Generate the log file name
+    log_name = datetime.now().strftime("%Y%m%d-%H%M%S") + suffix + ".log"
+    filename = log_dir / log_name
+
+    # Remove any existing handlers from the logger
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+
+    # Prevent log propagation to the root logger
+    logger.propagate = False
+
+    # Create a file handler
+    file_handler = logging.FileHandler(filename, encoding='utf-8')
+    file_handler.setLevel(logging.INFO)
+
+    # Create a formatter and attach it to the file handler
+    formatter = logging.Formatter('%(asctime)s: %(levelname)s: %(filename)s: %(message)s')
+    file_handler.setFormatter(formatter)
+
+    # Add the file handler to the logger
+    logger.addHandler(file_handler)
+
+    # Debugging: Print all handlers (can be removed later)
+    for handler in logger.handlers:
+        print(f"My logger handler: {handler}")
+
+    return logger, filename
 
 # -----------------------------------------------------------------------------
 # Utils to monitor execution time
@@ -340,779 +397,91 @@ def preprocess_occurrences(config, occurrences_path: Path):
 
     return output_path
 
+def preprocess_occurrences_stream(config, occurrences_path: Path):
+    start_time = time.time()
+
+    assert occurrences_path is not None, "No occurrence path provided"
+    if config['format'].lower() != "dwca":
+        raise ValueError(f"Unknown format: {config['format'].lower()}")
+
+    seen_identifiers = set()
+    species_counts = defaultdict(int)
+    max_img_per_species = config.get('max_img_spc', float('inf'))
+
+    chunk_size = 100
+    chunk_data = defaultdict(list)
+    processed_rows = 0
+
+    output_path = occurrences_path.with_suffix(".parquet")
+    parquet_writer = None
+
+    with DwCAReader(occurrences_path) as dwca:
+        for row in dwca:
+            extensions = row.extensions[:-1]
+            
+            for e in extensions:
+                identifier = e.data['http://purl.org/dc/terms/identifier']
+                
+                if not identifier:
+                    continue
+
+                identifier_hash = mmh3.hash(identifier)
+                if identifier_hash in seen_identifiers:
+                    continue
+                seen_identifiers.add(identifier_hash)
+
+                metadata = {k.split('/')[-1]: v for k, v in row.data.items() 
+                            if k.split('/')[-1] in KEYS_OCC + KEYS_GBIF}
+                
+                metadata.update({
+                    k.split('/')[-1]: v for k, v in e.data.items() 
+                    if k.split('/')[-1] in KEYS_MULT
+                })
+
+                if any(not metadata.get(key) for key in KEYS_GBIF):
+                    continue
+
+                taxon_key = metadata.get('taxonKey')
+                species_counts[taxon_key] += 1
+                
+                if species_counts[taxon_key] > max_img_per_species:
+                    continue
+
+                # Accumulate data in chunk
+                for k, v in metadata.items():
+                    chunk_data[k].append(v)
+                
+                processed_rows += 1
+
+                # Write chunk when full
+                if processed_rows % chunk_size == 0:
+                    chunk_table = pa.table(chunk_data)
+                    
+                    if parquet_writer is None:
+                        parquet_writer = pq.ParquetWriter(output_path, chunk_table.schema)
+                    
+                    parquet_writer.write_table(chunk_table)
+                    chunk_data = defaultdict(list)
+
+        # Write final chunk if exists
+        if chunk_data:
+            chunk_table = pa.table(chunk_data)
+            if parquet_writer is None:
+                parquet_writer = pq.ParquetWriter(output_path, chunk_table.schema)
+            parquet_writer.write_table(chunk_table)
+
+        if parquet_writer:
+            parquet_writer.close()
+
+    print(f"Total processing time: {time.time() - start_time:.2f} seconds")
+    print(f"Total unique rows processed: {processed_rows}")
+
+    return output_path
+
 # -----------------------------------------------------------------------------
 # Download the images using the prepared download file
 
-# class ImageManager:
-#     @abstractmethod
-#     def save(self, img, img_path):
-#         pass 
 
-#     @abstractmethod
-#     def remove(self, img_path):
-#         pass 
-
-# class LocalImageManager(ImageManager):
-#     def __init__(self, dataset_dir):
-#         self.dataset_dir = dataset_dir
-
-#     def save(self, img, img_path):
-#         abs_img_path = join(self.dataset_dir, img_path)
-#         with open(abs_img_path, 'wb') as handler:
-#             handler.write(img)
-    
-#     def remove(self, img_path):
-#         abs_img_path = join(self.dataset_dir, img_path)
-#         if os.path.exists(abs_img_path):
-#             os.remove(abs_img_path)
-
-# class RemoteImageManager(ImageManager):
-#     def __init__(self, dataset_dir, remote_dir):
-#         o = urlparse(remote_dir)
-#         remote_dir = Path(o.path)
-#         sftp_server = f"{o.scheme}://{o.netloc}"
-#         self.sftp_server = sftp_server
-
-#         self.dataset_dir = dataset_dir
-
-
-class FileManager:
-    def __init__(self, config: dict, occurrences_path: Path):
-        self.do_upload = 'remote_dir' in config.keys() and config['remote_dir'] is not None
-        self.num_download_threads = config['num_threads']
-        self.occurrences_path = occurrences_path
-        self.df = pd.read_parquet(self.occurrences_path)
-
-        # Get all occurrences urls, formats, speciesKey
-        self.occs = [(i,(row.identifier, row.format, row.speciesKey)) for i, row in self.df.iterrows()]
-        self.num_files = len(self.occs)
-
-        self.download_threads = []
-        self.dataset_dir = Path(config['dataset_dir'])
-
-        # Max number of attempts before given up a download
-        self.max_num_attempts = 5
-
-        # Dir for storing the images locally
-        # Removed after upload, if do_upload
-        self.output_path = self.dataset_dir / 'images'
-        os.makedirs(self.output_path, exist_ok=True)
-
-        # Logger
-        self.logger, log_filename = set_logger(self.dataset_dir, "_download")
-
-        # Stores the image names and hashes
-        # self.img_names = []
-        # self.img_hashes = []
-        if 'filename' not in self.df.keys():
-            self.df['filename'] = None
-        if 'sha256' not in self.df.keys():
-            self.df['sha256'] = None
-
-        # Display a counter
-        self.downloaded_count = 0
-        self.lock = threading.Lock()  # Lock to synchronize counter updates and display
-
-        if self.do_upload:
-            self.upload_threads = []
-            self.num_upload_threads = config['num_threads']
-            self.remote_dir = config['remote_dir']
-
-            # Parse the remote url to get the server name and the remote path
-            o = urlparse(self.remote_dir)
-            self.remote_dir = Path(o.path)
-            self.netloc = o.netloc
-            # self.user, self.server = o.netloc.split(':@')
-
-            self.sftp_server = f"{o.scheme}://{o.netloc}"
-
-            # Make root dataset dir
-            with IOHandler(local_dir=self.output_path, verbose=False) as io:
-                io.execute_command(f"mkdir -fp {self.remote_dir}")
-
-            # Queue to hold downloaded files for uploading
-            # Set a maxsize to the queue to avoid downloading the whole dataset locally if the uploader 
-            # cannot keep up with the downloader
-            self.file_queue = Queue(maxsize=100)
-
-            self.uploaded_count = 0
-    
-    def _download_one_file(self, occ, num_attempts=0, sleep=30, max_sleep=30):
-        url, format, species = occ
-        # default_return = (None,None, (None, None))
-        default_return = (None, None, None)
-        try:
-            # with requests.get(url, stream=True) as response:
-            headers = {'User-Agent': 'Wget/1.21.2 Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/56.0.2924.87 Safari/537.36',}
-            with requests.get(url, headers=headers) as response:
-            # with requests.get(url, allow_redirects=False) as response:
-
-                if response.status_code == 429:
-                    self.logger.info(f"429 Too many requests for {occ}. Waiting {sleep} and reattempting.")
-                    if num_attempts > self.max_num_attempts:
-                        self.logger.info(f"Reached maximum number of attempts for occurence {occ}. Skipping it.")
-                        return default_return
-                    else:
-                        if 'Retry-After' in response.headers:
-                            sleep429 = int(response.headers["Retry-After"])
-                        else:
-                            sleep429 = sleep
-                        time.sleep(sleep429)
-                        return self._download_one_file(occ, sleep=min(sleep429*2,max_sleep), num_attempts=num_attempts+1)
-                elif response.status_code == 502 or response.status_code == 503:
-                    self.logger.info(f"{response.status_code} for {occ}. Waiting {sleep} and reattempting.")
-                    if num_attempts > self.max_num_attempts:
-                        self.logger.info(f"Reached maximum number of attempts for occurence {occ}. Skipping it.")
-                        return default_return
-                    else:
-                        return self._download_one_file(occ, sleep=min(sleep*2,max_sleep), num_attempts=num_attempts+1)
-                elif response.status_code == 403:
-                    self.logger.info(f"403 Forbidden access for {occ}.")
-                    return default_return
-                elif response.status_code == 404:
-                    self.logger.info(f"404 Not found for {occ}.")
-                    return default_return
-                elif not response.ok:
-                    self.logger.info(response, occ)
-                    return default_return
-                
-                # Check image type
-                valid_format = ('image/png', 'image/jpeg', 'image/gif', 'image/jpg', 'image/tiff', 'image/tif')
-                if format not in valid_format:
-                    # Attempting to get it from the url
-                    if response.headers['content-type'].lower() not in valid_format:
-                        self.logger.info("Invalid image type {} (in csv) and {} (in content-type) for url {}.".format(format, response.headers['content-type'], url))
-                        return default_return
-                    else:
-                        format = response.headers['content-type'].lower()
-                
-                # Get image name by hashing
-                ext = "." + format.split("/")[1]
-                basename = hashlib.sha1(url.encode("utf-8")).hexdigest()
-                img_name = basename + ext
-
-                # Create image output path
-                # if species == pd.NA: 
-                #     self.logger.info("Invalid species key {}.".format(species))
-                #     return
-                img_dir = Path(str(int(species)))
-                img_local_dir = self.output_path / img_dir
-                img_path = img_local_dir / img_name
-
-                # Create dir and dl image
-                os.makedirs(img_local_dir, exist_ok=True)
-
-                # Store the image
-                # filemanager.save(response.content, img_path)
-                with open(img_path, 'wb') as handler:
-                    handler.write(response.content)
-                
-                # Check if the image is corrupted
-                try:
-                    with Image.open(img_path) as img:
-                        img.verify()  # Verify that it is, in fact, an image
-                except (IOError, SyntaxError, PIL.UnidentifiedImageError, Image.DecompressionBombError) as e:
-                    if num_attempts > self.max_num_attempts:
-                        self.logger.info(f"Image {img_path} is corrupted, failed to download.")
-                        return default_return
-                    # retry once to download if it is the case
-                    self.logger.info(f"Image {img_path} seems corrupted, retrying to download...")
-                    return self._download_one_file(occ, sleep=sleep, num_attempts=num_attempts+1)
-                
-                # Hash the image and return both the image and the hash
-                with Image.open(img_path) as img:
-                    img = img.convert('RGB')  # Ensure consistency
-                    img_hash = hashlib.sha256(img.tobytes()).hexdigest()
-
-                # Upload on ERDA
-                # Queueing system.
-                # if self.do_upload:
-                #     # self.file_queue.put((img_dir, img_path))
-                #     try:
-                #         self.file_queue.put(img_path)
-                #     except Full:
-                #         time.sleep(sleep)
-                # if upload_fn is not None:
-                #     upload_fn((img_dir, img_path))
-                return img_path, img_name, img_hash
-                # return img_name, img_hash, (img_dir, img_path)
-                # return check_and_hash_image(img_path)
-                # return img_name
-        except Exception as e:
-            if num_attempts > self.max_num_attempts:
-                self.logger.info(f"Reached maximum number of attempts for occurence {occ}. Skipping it.")
-                return default_return
-            else:
-                self.logger.info(f"Unknown error: {e}, for URL {url}. Waiting {sleep} secondes and reattempting.")
-                time.sleep(sleep)
-                return self._download_one_file(occ, sleep=sleep, num_attempts=num_attempts+1)
-
-    def _display_progress(self):
-        """Display the progress of download and upload in one line."""
-        with self.lock:
-            progress = f"\rDownloaded: {self.downloaded_count}/{self.num_files}"
-            if self.do_upload:
-                progress += f" | Uploaded: {self.uploaded_count}/{self.num_files}"
-            sys.stdout.write(progress)
-            sys.stdout.flush()
-
-    def _download_files_with_one_thread(self, thread_id):
-        for i, occ in self.occs[thread_id::self.num_download_threads]:
-            _, img_name, img_hash = self._download_one_file(occ)
-
-            self.df.loc[i, 'filename'] = img_name
-            self.df.loc[i, 'sha256'] = img_hash
-
-            # self.img_names.append(img_name)
-            # self.img_hashes.append(img_hash)
-
-            with self.lock:
-                self.downloaded_count += 1
-            self._display_progress()
-
-            # Add file to queue if remote
-            # if self.do_upload:
-            #     self.file_queue.put(upload_input)
-        if self.do_upload:
-            self.file_queue.put(None)
-
-    def _upload_files_with_one_thread_v1(self):
-        """Upload function for upload threads."""
-        with IOHandler(local_dir=self.output_path, verbose=False) as io:
-            io.cd(self.remote_dir)
-            while True:
-                try:
-                    file = self.file_queue.get()  # Retrieve file from the queue
-                    if file is None:  # Check for sentinel value
-                        # Put the sentinel back for other threads and exit loop
-                        self.file_queue.put(None)
-                        break
-                    
-                    # Upload
-                    img_dir = file.parent.name
-                    img_name = file.name
-                    remote_img_path = self.remote_dir / img_dir / img_name
-                    io.execute_command(f"mkdir -fp {img_dir}")
-                    io.put(join(img_dir, img_name), str(remote_img_path))
-
-                    # Remove local file 
-                    os.remove(file)
-
-                    with self.lock:
-                        self.uploaded_count += 1
-                    self._display_progress()
-
-                    self.file_queue.task_done()  # Mark file as processed
-                except Exception as e:
-                    self.logger.error(f"Failed to upload {file}: {e}")
-    
-    def _upload_files_with_one_thread(self):
-        """Upload function for upload threads."""
-        # with IOHandler(local_dir=self.output_path, verbose=False) as io:
-            # io.cd(self.remote_dir)
-        try:
-            lftp_command = f'lftp -e "open {self.sftp_server}"'
-            process = subprocess.Popen(lftp_command, shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            while True:
-                file = self.file_queue.get()  # Retrieve file from the queue
-                if file is None:  # Check for sentinel value
-                    # Put the sentinel back for other threads and exit loop
-                    self.file_queue.put(None)
-                    break
-                
-                # Upload
-                img_dir = file.parent.name
-                img_name = file.name
-                remote_img_dir = self.remote_dir / img_dir
-                remote_img_path = self.remote_dir / img_dir / img_name
-                # io.execute_command(f"mkdir -fp {img_dir}")
-                # io.put(join(img_dir, img_name), str(remote_img_path))
-
-                # lftp_command = f'lftp -e "open {self.sftp_server}; mkdir -p {remote_img_dir}; put {file} -o {remote_img_path}; bye"'
-                # # lftp_command = f'lftp -e "open {stfp_server}; put {img_path} -o {remote_img_path}; bye"'
-                # result = subprocess.run(lftp_command, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                # Prepare commands for lftp
-                upload_command = f"mkdir -p {remote_img_dir}; put {file} -o {remote_img_path};"
-                process.stdin.write(upload_command + "\n")
-
-                # Remove local file 
-                os.remove(file)
-
-                with self.lock:
-                    self.uploaded_count += 1
-                self._display_progress()
-
-                self.file_queue.task_done()  # Mark file as processed
-
-            process.stdin.write("bye\n")  # Close the lftp session
-            process.stdin.close()
-            process.wait()  # Wait for the process to finish
-        except Exception as e:
-            self.logger.info(f"Failed to upload: {e}")
-        # finally:
-        #     if process is not None:
-        #         process.stdin.write("bye\n")  # Close the lftp session
-        #         process.stdin.close()
-        #         process.wait()  # Wait for the process to finish
-
-    def _monitor_upload_threads(self):
-        """Monitor upload threads and restart if needed."""
-        while True:
-            time.sleep(5)  # Check every few seconds
-            for thread in self.upload_threads:
-                if not thread.is_alive():
-                    self.logger.info(f"Thread {thread.name} is dead.")
-
-                    self.logger.info(f"Restarting {thread.name} due to inactivity.")
-                    # Logic to restart the thread, if needed
-                    new_thread = threading.Thread(target=self._upload_files_with_one_thread, name=thread.name)
-                    new_thread.start()
-                    self.upload_threads.remove(thread)
-                    self.upload_threads.append(new_thread)
-
-    def _upload_files(self, items):
-        """Private method. To use with self.upload_files.
-        """
-        with IOHandler(local_dir=self.output_path, verbose=False) as io:
-            io.cd(self.remote_dir)
-
-            for item in items:
-                local_file, remote_dir, remote_file = item
-                io.execute_command(f"mkdir -f {remote_dir}")
-                io.cd(remote_dir)
-                io.put(local_file, remote_file)
-                io.cd("..")
-
-    @timeit
-    def upload_files(self):
-        """Upload files. 
-        
-        Note
-        ----
-        This function is used to perform independently the upload after the download.
-        Mostly for a debugging purpose.
-        """
-
-        assert 'filename' in self.df.keys(), "Error in DataFrame. 'filename' must be one of the columns."
-        assert self.do_upload, "Upload must be configured to start."
-
-        files = self.df['filename'].tolist()
-        # print(files)
-        dirs = self.df['speciesKey'].tolist()
-        local_files = [str(Path(img_dir) / file) for img_dir, file in zip(dirs, files)]
-        remote_dirs = [str(self.remote_dir / img_dir) for img_dir in dirs]
-        remote_files = [str(self.remote_dir / img_dir / file) for img_dir, file in zip(dirs, files)]
-
-        n = self.num_download_threads
-        chunks = [list() for _ in range(n)]
-        for i, f in enumerate(zip(local_files, remote_dirs, remote_files)):
-            chunks[i % n].append(f)
-
-        thread_map(self._upload_files, chunks, max_workers=10)
-
-    @timeit
-    def transfer_files_v1(self):
-        """Initialize and start download and upload threads."""
-        # Create and start download threads
-        self.download_threads = [
-            threading.Thread(target=self._download_files_with_one_thread, args=(i,), name=f"Downloader-{i}")
-            for i in range(self.num_download_threads)
-        ]
-        for thread in self.download_threads:
-            thread.start()
-
-        # Create and start upload threads
-        if self.do_upload:
-            # Start the monitor thread
-            # monitor_thread = threading.Thread(target=self._monitor_upload_threads)
-            # monitor_thread.start()
-
-            self.upload_threads = [
-                # threading.Thread(target=self.upload_files, args=(i,), name=f"Uploader-{i}")
-                # threading.Thread(target=self._upload_files_with_one_thread, name=f"Uploader-{i}")
-                threading.Thread(target=self._upload_files_with_one_thread_v1, name=f"Uploader-{i}")
-                for i in range(self.num_upload_threads)
-            ]
-            for thread in self.upload_threads:
-                thread.start()
-
-        # Wait for all download threads to finish
-        for thread in self.download_threads:
-            thread.join()
-
-        if self.do_upload:
-            # Wait for all items in the queue to be processed
-            self.file_queue.join()
-            # monitor_thread.join()
-
-            # Wait for all upload threads to finish
-            for thread in self.upload_threads:
-                thread.join()
-
-        print("") # disply bug fix
-        print("All files have been downloaded and uploaded.")
-
-        # Add images names and hashes in the df
-        # self.df['filename'] = self.img_names
-        # self.df['sha256'] = self.img_hashes
-        self.df.to_parquet(self.occurrences_path, engine='pyarrow', compression='gzip')
-
-        print("Updated occurrence file to integrate the image filenames.")
-
-    def _download_upload_files_one_thread(self, thread_id):
-        """Download and upload in one thread."""
-        with IOHandler(local_dir=self.output_path, verbose=False) as io:
-            io.cd(self.remote_dir)
-            for i, occ in self.occs[thread_id::self.num_download_threads]:
-                try:
-                    # Download image
-                    file, img_name, img_hash = self._download_one_file(occ)
-
-                    self.df.loc[i, 'filename'] = img_name
-                    self.df.loc[i, 'sha256'] = img_hash
-
-                    # Upload image if not None
-                    if file is not None:
-                        img_dir = file.parent.name
-                        img_name = file.name
-                        io.execute_command(f"mkdir -fp {img_dir}")
-                        io.cd(img_dir)
-                        io.put(join(img_dir, img_name), img_name)
-                        io.cd("..")
-
-                    # Display progress
-                    with self.lock:
-                        self.downloaded_count += 1
-                        self.uploaded_count += 1
-                    self._display_progress()
-                except Exception as e:
-                    self.logger.error(f"Error '{e}' while downloading or uploading image {occ}")
-
-    @timeit
-    def transfer_files(self):
-        """Initialize and start download and upload threads."""
-        if self.do_upload:
-            # thread_map(self._download_upload_files_one_thread,
-            #            [i for i in range(self.num_download_threads)],
-            #            max_workers=self.num_download_threads)
-            with ThreadPoolExecutor(max_workers=self.num_download_threads) as exe:
-                futures = [exe.submit(self._download_upload_files_one_thread, i) for i in range(self.num_download_threads)]
-        # Use thread map
-        self.df.to_parquet(self.occurrences_path, engine='pyarrow', compression='gzip')
-
-#     def put(self, local_img_path, img_dir)
-# Function to upload an image to the lftp server
-def upload_one_img(item, logger, sftp_server, remote_dir, io: IOHandler):
-            
-    img_dir, img_path = item
-    
-    if img_dir is not None and img_path is not None:
-        img_name = img_path.name
-        try:
-            # o = urlparse(remote_dir)
-            # remote_dir = Path(o.path)
-            remote_img_dir = remote_dir / img_dir
-            remote_img_path = remote_img_dir / img_name
-            # stfp_server = 'sftp://erda'
-            # stfp_server = f"{o.scheme}://{o.netloc}"
-
-            # lftp_command = f'lftp -e "open {sftp_server}; mkdir -p {remote_img_dir}; put {img_path} -o {remote_img_path}; bye"'
-            # lftp_command = f'lftp -e "open {stfp_server}; put {img_path} -o {remote_img_path}; bye"'
-            # result = subprocess.run(lftp_command, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            # io.put(str(img_path), str(remote_img_path))
-
-            # cmd = f"mkdir -p {remote_img_dir}; put {Path(img_dir)/img_name} -o {remote_img_path}"
-            cmd = f"put {Path(img_dir)/img_name} -o {remote_img_path}"
-            io.execute_command(cmd)
-
-            # print(f"Uploaded {img_name} to server successfully.")
-            # Clean up local file after successful upload
-            os.remove(img_path)
-            # print(f"Deleted local file: {img_path}")
-        except subprocess.CalledProcessError as e:
-            logger.info(f"Failed to upload {img_name}: {e}")
-
-def get_one_img(
-        occ,
-        output_path: Path,
-        # filemanager: FileManager,
-        logger: logging.Logger,
-        num_attempts=0,
-        sleep=30,
-        max_num_attempts=5,
-        do_upload=False,
-        upload_fn = None,
-        verbose=False,
-        ):
-    """Put image located in `url` and stored in a specific `format` to the
-    `species` subfolder in `path_erd` folder on `io` server. 
-    """
-    # TODO? Return the list of undownloaded file?
-    url, format, species = occ
-    default_return = (None,None, (None, None))
-    try:
-        # with requests.get(url, stream=True) as response:
-        headers = {'User-Agent': 'Wget/1.21.2 Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/56.0.2924.87 Safari/537.36',}
-        with requests.get(url, headers=headers) as response:
-        # with requests.get(url, allow_redirects=False) as response:
-
-            if response.status_code == 429:
-                logger.info(f"429 Too many requests for {occ}. Waiting {sleep} and reattempting.")
-                if num_attempts > max_num_attempts:
-                    logger.info(f"Reached maximum number of attempts for occurence {occ}. Skipping it.")
-                    return default_return
-                else:
-                    if 'Retry-After' in response.headers:
-                        sleep429 = int(response.headers["Retry-After"])
-                    else:
-                        sleep429 = sleep
-                    time.sleep(sleep429)
-                    # return get_one_img(occ, output_path, logger, sleep=min(sleep429*2,20), num_attempts=num_attempts+1)
-                    return get_one_img(occ, output_path, logger, sleep=sleep429, num_attempts=num_attempts+1)
-            elif response.status_code == 502 or response.status_code == 503:
-                logger.info(f"{response.status_code} for {occ}. Waiting {sleep} and reattempting.")
-                if num_attempts > max_num_attempts:
-                    logger.info(f"Reached maximum number of attempts for occurence {occ}. Skipping it.")
-                    return default_return
-                else:
-                    # return get_one_img(occ, output_path, logger, sleep=min(sleep*2,20), num_attempts=num_attempts+1)
-                    return get_one_img(occ, output_path, logger, sleep=sleep, num_attempts=num_attempts+1)
-            elif response.status_code == 403:
-                logger.info(f"403 Forbidden access for {occ}.")
-                return default_return
-            elif response.status_code == 404:
-                logger.info(f"404 Not found for {occ}.")
-                return default_return
-            elif not response.ok:
-                logger.info(response, occ)
-                return default_return
-            
-            # Check image type
-            valid_format = ('image/png', 'image/jpeg', 'image/gif', 'image/jpg', 'image/tiff', 'image/tif')
-            if format not in valid_format:
-                # Attempting to get it from the url
-                if response.headers['content-type'].lower() not in valid_format:
-                    logger.info("Invalid image type {} (in csv) and {} (in content-type) for url {}.".format(format, response.headers['content-type'], url))
-                    return default_return
-                else:
-                    format = response.headers['content-type'].lower()
-            
-            # Get image name by hashing
-            ext = "." + format.split("/")[1]
-            basename = hashlib.sha1(url.encode("utf-8")).hexdigest()
-            img_name = basename + ext
-
-            # Create image output path
-            # if species == pd.NA: 
-            #     logger.info("Invalid species key {}.".format(species))
-            #     return
-            img_dir = Path(str(int(species)))
-            img_local_dir = output_path / img_dir
-            img_path = img_local_dir / img_name
-
-            # Create dir and dl image
-            os.makedirs(img_local_dir, exist_ok=True)
-
-            # Store the image
-            # filemanager.save(response.content, img_path)
-            with open(img_path, 'wb') as handler:
-                handler.write(response.content)
-            
-            # Check if the image is corrupted
-            try:
-                with Image.open(img_path) as img:
-                    img.verify()  # Verify that it is, in fact, an image
-            except (IOError, SyntaxError, PIL.UnidentifiedImageError, Image.DecompressionBombError) as e:
-                if num_attempts > max_num_attempts:
-                    logger.info(f"Image {img_path} is corrupted, failed to download.")
-                    return default_return
-                # retry once to download if it is the case
-                logger.info(f"Image {img_path} seems corrupted, retrying to download...")
-                return get_one_img(occ, output_path, logger, num_attempts=num_attempts+1)
-            
-            # Hash the image and return both the image and the hash
-            with Image.open(img_path) as img:
-                img = img.convert('RGB')  # Ensure consistency
-                img_hash = hashlib.sha256(img.tobytes()).hexdigest()
-
-            # Upload on ERDA
-            # if do_upload:
-            #     UPLOAD_QUEUE.put((img_dir, img_path))
-            if upload_fn is not None:
-                upload_fn((img_dir, img_path))
-            # return img_name, img_hash
-            return img_name, img_hash, (img_dir, img_path)
-            # return check_and_hash_image(img_path)
-            # return img_name
-    except Exception as e:
-        if num_attempts > max_num_attempts:
-            logger.info(f"Reached maximum number of attempts for occurence {occ}. Skipping it.")
-            return default_return
-        else:
-            logger.info(f"Unknown error: {e}, for URL {url}. Waiting {sleep} secondes and reattempting.")
-            time.sleep(sleep)
-            return get_one_img(occ, output_path, logger, num_attempts=num_attempts+1)
-
-def set_logger(log_dir=Path("."), suffix=""):
-    """Helper function to set up the logging process.
-
-    Parameters
-    ----------
-    suffix : str, default=""
-        Suffix to add in the end of the file name.
-    """
-    logger = logging.getLogger(__name__)
-
-    log_name = datetime.now().strftime("%Y%m%d-%H%M%S") + suffix + ".log"
-    filename = log_dir / log_name
-    logging.basicConfig(
-        format='%(asctime)s: %(levelname)s: %(filename)s: %(message)s',
-        encoding='utf-8', 
-        level=logging.INFO,
-        handlers=[logging.FileHandler(filename=filename)]
-        )
-    return logger, filename
-
-# Function to upload an image to the lftp server
-def upload_image(logger, sftp_server, remote_dir):
-    while True:
-        item = UPLOAD_QUEUE.get()  # Blocks until an item is available
-        if item is None:
-            # Sentinel to break the loop
-            break
-            
-        img_dir, img_path = item
-        img_name = img_path.name
-        
-        try:
-            # o = urlparse(remote_dir)
-            # remote_dir = Path(o.path)
-            remote_img_dir = remote_dir / img_dir
-            remote_img_path = remote_img_dir / img_name
-            # stfp_server = 'sftp://erda'
-            # stfp_server = f"{o.scheme}://{o.netloc}"
-            lftp_command = f'lftp -e "open {sftp_server}; mkdir -p {remote_img_dir}; put {img_path} -o {remote_img_path}; bye"'
-            # lftp_command = f'lftp -e "open {stfp_server}; put {img_path} -o {remote_img_path}; bye"'
-            result = subprocess.run(lftp_command, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            print(f"Uploaded {img_name} to server successfully.")
-            # Clean up local file after successful upload
-            os.remove(img_path)
-            print(f"Deleted local file: {img_path}")
-        except subprocess.CalledProcessError as e:
-            logger.info(f"Failed to upload {img_name}: {e.stderr.decode()}")
-        finally:
-            UPLOAD_QUEUE.task_done()
-
-def download(config, preprocessed_occurrences: Path, verbose=False):
-    """Download the images with multi-threading. Adds the image filenames in preprocessed_occurrences.
-
-    Takes care of networks problems.
-
-    Output folder is dataset_dir / images.
-    Output a .log file
-    """
-    print("Downloading the images...")
-    # do_upload = 'remote_dir' in config.keys() and config['remote_dir'] is not None
-
-    # if do_upload:
-    #     print(f"A remote directory has been defined. Will attempt to upload data to {config['remote_dir']}. Local data will be removed while downloading.")
-
-    datasets_dir = Path(config['dataset_dir'])
-
-    df = pd.read_parquet(preprocessed_occurrences)
-    # TMP, DEBUG
-    # df = df[:100]
-    occs = [(row.identifier, row.format, row.speciesKey) for row in df.itertuples(index=False)]
-
-    # Output path
-    # output_path = Path(config['dataset_dir'])  / 'images'
-    output_path = datasets_dir  / 'images'
-    os.makedirs(output_path, exist_ok=True)
-
-    # Logger
-    log_dir = datasets_dir
-    logger, log_filename = set_logger(log_dir, "_download")
-
-    # get_img = partial(get_one_img, output_path=output_path, logger=logger, do_upload=do_upload)
-    # if do_upload:
-    #     o = urlparse(config['remote_dir'])
-    #     remote_dir = Path(o.path)
-    #     sftp_server = f"{o.scheme}://{o.netloc}"
-    #     upload = partial(upload_image, logger=logger, sftp_server=sftp_server, remote_dir=remote_dir)
-
-    # max_workers = config['num_threads']
-    # results = []
-    # with ThreadPoolExecutor(max_workers=max_workers) as executor:
-    #     # Create a pool of downloaders
-    #     download_futures = [executor.submit(get_img, occ) for occ in occs]
-
-    #     # Collect the results from the completed download tasks
-    #     for future in as_completed(download_futures):
-    #         result = future.result()  # This is (image_name, image_hash) tuple
-    #         if result is not None:
-    #             results.append(result)  # Add it to the list
-
-    #     # Start a few threads for uploading files
-    #     if do_upload:
-    #         upload_threads = []
-    #         for _ in range(max_workers):
-    #             t = threading.Thread(target=upload)
-    #             t.start()
-    #             upload_threads.append(t)
-        
-    #     # Wait for all download threads to complete
-    #     wait(download_futures)
-
-    #     if do_upload:
-    #         # Signal the uploader threads to stop by adding a sentinel (None) to the queue
-    #         for _ in upload_threads:
-    #             UPLOAD_QUEUE.put(None)
-            
-    #         # Wait for all upload threads to finish
-    #         for t in upload_threads:
-    #             t.join()
-
-    # if do_upload:
-    #     o = urlparse(config['remote_dir'])
-    #     remote_dir = Path(o.path)
-    #     sftp_server = f"{o.scheme}://{o.netloc}"
-    #     io = IOHandler(local_dir=os.path.abspath(output_path))
-    #     io.__enter__()
-    #     upload_fn = partial(upload_one_img, logger=logger, sftp_server=sftp_server, remote_dir=remote_dir, io=io)
-    # else:
-    #     upload_fn = None
-    # get_img = partial(get_one_img, output_path=output_path, logger=logger, upload_fn=upload_fn)
-    get_img = partial(get_one_img, output_path=output_path, logger=logger, upload_fn=None)
-    results = thread_map(get_img, occs, max_workers=config['num_threads'])
-    img_names = [x[0] for x in results]
-    img_hashes = [x[1] for x in results]
-
-    # if do_upload:
-    #     print('Making species folders on remote server...')
-    #     species = df['speciesKey'].unique()
-    #     f = lambda folder: io.execute_command(f'mkdir -f {join(remote_dir, folder)}')
-    #     thread_map(f, species, max_workers=config['num_threads'])
-    #     print('Folders created')
-
-    #     logger.info("Start uploading...")
-    #     items = [x[2] for x in results]
-    #     thread_map(upload_fn, items, max_workers=config['num_threads'])
-    #     io.__exit__()
-    #     logger.info("Uploading done.")
-
-    # Remove local image directory, if upload
-    # if do_upload:
-    #     # os.remove(output_path)
-    #     shutil.rmtree(output_path)
-
-    print(f"Download done. Downloaded images can be found in {output_path} and download logs in {log_filename}.")
-
-    # TODO: Updates occurrence file by adding the filenames
-    df['filename'] = img_names
-    df['sha256'] = img_hashes
-    df.to_parquet(preprocessed_occurrences, engine='pyarrow', compression='gzip')
-
-    print("Updated occurrence file to integrate the image filenames.")
 
 # -----------------------------------------------------------------------------
 # Clean the dataset 
@@ -1343,7 +712,7 @@ def load_config():
     config = OmegaConf.merge(cli_config, yml_config)
     return config
 
-def create_save_dirs(config):
+def create_save_dir(config):
     os.makedirs(config['dataset_dir'], exist_ok=True)
 
 def main():
@@ -1351,7 +720,7 @@ def main():
     config=load_config()
 
     # Create the output folders hierarchy
-    create_save_dirs(config)
+    create_save_dir(config)
 
     # Send a post request to GBIF to get the occurrence records
     # download_key = post(config)
@@ -1360,21 +729,24 @@ def main():
     # Download the occurrence file generated by GBIF
     # occurrences_path = download_occurrences(config, download_key=download_key)
     # occurrences_path = Path("/home/george/codes/gbif-request/data/classif/mini/0013397-241007104925546.zip")
+    occurrences_path = Path("/mnt/c/Users/au761367/OneDrive - Aarhus universitet/Codes/python/gbifxdl/data/classif/mini/0013397-241007104925546.zip")
 
     # Preprocess the occurrence file
-    # preprocessed_occurrences = preprocess_occurrences(config, occurrences_path)
-    preprocessed_occurrences = Path("/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546.parquet")
+    preprocessed_occurrences = preprocess_occurrences(config, occurrences_path)
+    # preprocessed_occurrences = preprocess_occurrences_dask(config, occurrences_path)
+    # preprocessed_occurrences = preprocess_occurrences_stream(config, occurrences_path)
+    # preprocessed_occurrences = Path("/mnt/c/Users/au761367/OneDrive - Aarhus universitet/Codes/python/gbifxdl/data/classif/mini/0013397-241007104925546.parquet")
     # postprocessing(config, preprocessed_occurrences)
 
     # Download the images
     # download(config, preprocessed_occurrences)
-    file_manager = FileManager(config, occurrences_path=preprocessed_occurrences)
-    file_manager.transfer_files()
+    # file_manager = FileManager(config, occurrences_path=preprocessed_occurrences)
+    # file_manager.transfer_files()
     # file_manager.upload_files()
     # img_dir = Path("/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546/images")
 
     # Clean the downloaded dataset
-    postprocessing(config, preprocessed_occurrences)
+    # postprocessing(config, preprocessed_occurrences)
 
 
 # -----------------------------------------------------------------------------
