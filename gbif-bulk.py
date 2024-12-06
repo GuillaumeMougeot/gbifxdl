@@ -48,6 +48,7 @@ import pyarrow as pa
 from collections import defaultdict
 
 import mmh3
+import psutil
 
 # -----------------------------------------------------------------------------
 # Logger
@@ -397,8 +398,28 @@ def preprocess_occurrences(config, occurrences_path: Path):
 
     return output_path
 
-def preprocess_occurrences_stream(config, occurrences_path: Path):
+def get_memory_usage():
+    """Get current process memory usage"""
+    process = psutil.Process(os.getpid())
+    return process.memory_info().rss / (1024 * 1024)  # MB
+
+def preprocess_occurrences_stream(config, occurrences_path: Path, chunk_size = 10000):
+    """Process DWCA to retrieve only relevant information and store it in a Parquet file.
+
+    Streams through the DWCA and works with chunks for storing to avoid loading the entire file into memory.
+    Include a deduplicate routine, based on hashing URL with mmh3, to remove duplicated URLs.
+    Store the URL hashes in the Parquet file in `url_hash` column.
+    """
     start_time = time.time()
+    
+    # Memory tracking setup
+    memory_log = []
+    def log_memory(stage):
+        current_memory = get_memory_usage()
+        memory_log.append((stage, current_memory))
+        print(f"{stage}: {current_memory:.2f} MB")
+
+    log_memory("Start")
 
     assert occurrences_path is not None, "No occurrence path provided"
     if config['format'].lower() != "dwca":
@@ -408,12 +429,13 @@ def preprocess_occurrences_stream(config, occurrences_path: Path):
     species_counts = defaultdict(int)
     max_img_per_species = config.get('max_img_spc', float('inf'))
 
-    chunk_size = 100
     chunk_data = defaultdict(list)
     processed_rows = 0
 
     output_path = occurrences_path.with_suffix(".parquet")
     parquet_writer = None
+
+    log_memory("Before processing")
 
     with DwCAReader(occurrences_path) as dwca:
         for row in dwca:
@@ -425,10 +447,16 @@ def preprocess_occurrences_stream(config, occurrences_path: Path):
                 if not identifier:
                     continue
 
-                identifier_hash = mmh3.hash(identifier)
-                if identifier_hash in seen_identifiers:
+                # Create two types of hashes:
+                # 1. For deduplication (faster integer hash)
+                dedup_hash = mmh3.hash(identifier)
+                # 2. For file naming (hex string, more suitable for filenames)
+                # url_hash = format(mmh3.hash128(identifier)[0], 'x')  # Using first 64 bits of 128-bit hash
+                url_hash = hashlib.sha1(identifier.encode("utf-8")).hexdigest()
+                
+                if dedup_hash in seen_identifiers:
                     continue
-                seen_identifiers.add(identifier_hash)
+                seen_identifiers.add(dedup_hash)
 
                 metadata = {k.split('/')[-1]: v for k, v in row.data.items() 
                             if k.split('/')[-1] in KEYS_OCC + KEYS_GBIF}
@@ -437,6 +465,11 @@ def preprocess_occurrences_stream(config, occurrences_path: Path):
                     k.split('/')[-1]: v for k, v in e.data.items() 
                     if k.split('/')[-1] in KEYS_MULT
                 })
+
+                # Add the URL hash to metadata
+                metadata['url_hash'] = url_hash
+
+                # print(f"metadata; {metadata}")
 
                 if any(not metadata.get(key) for key in KEYS_GBIF):
                     continue
@@ -450,6 +483,8 @@ def preprocess_occurrences_stream(config, occurrences_path: Path):
                 # Accumulate data in chunk
                 for k, v in metadata.items():
                     chunk_data[k].append(v)
+
+                # print(f"chunk_data; {chunk_data}")
                 
                 processed_rows += 1
 
@@ -462,6 +497,8 @@ def preprocess_occurrences_stream(config, occurrences_path: Path):
                     
                     parquet_writer.write_table(chunk_table)
                     chunk_data = defaultdict(list)
+                    
+                    log_memory(f"After processing {processed_rows} rows")
 
         # Write final chunk if exists
         if chunk_data:
@@ -473,8 +510,13 @@ def preprocess_occurrences_stream(config, occurrences_path: Path):
         if parquet_writer:
             parquet_writer.close()
 
+    log_memory("End of processing")
+
     print(f"Total processing time: {time.time() - start_time:.2f} seconds")
     print(f"Total unique rows processed: {processed_rows}")
+    print("\nMemory Usage Log:")
+    for stage, memory in memory_log:
+        print(f"{stage}: {memory:.2f} MB")
 
     return output_path
 
@@ -732,9 +774,9 @@ def main():
     occurrences_path = Path("/mnt/c/Users/au761367/OneDrive - Aarhus universitet/Codes/python/gbifxdl/data/classif/mini/0013397-241007104925546.zip")
 
     # Preprocess the occurrence file
-    preprocessed_occurrences = preprocess_occurrences(config, occurrences_path)
+    # preprocessed_occurrences = preprocess_occurrences(config, occurrences_path)
     # preprocessed_occurrences = preprocess_occurrences_dask(config, occurrences_path)
-    # preprocessed_occurrences = preprocess_occurrences_stream(config, occurrences_path)
+    preprocessed_occurrences = preprocess_occurrences_stream(config, occurrences_path)
     # preprocessed_occurrences = Path("/mnt/c/Users/au761367/OneDrive - Aarhus universitet/Codes/python/gbifxdl/data/classif/mini/0013397-241007104925546.parquet")
     # postprocessing(config, preprocessed_occurrences)
 

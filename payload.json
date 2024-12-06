@@ -22,12 +22,12 @@
                 "type": "in",
                 "key": "COUNTRY",
                 "values": [
-                    "AL", "AD", "AT", "BY", "BE", "BA", "BG", "HR", "CY",
-                    "CZ", "DK", "EE", "FI", "FR", "DE", "GR", "HU", "IS",
-                    "IE", "IT", "LV", "LI", "LT", "LU", "MT", "MD", "MC",
-                    "ME", "NL", "MK", "NO", "PL", "PT", "RO", "RU", "SM",
-                    "RS", "SK", "SI", "ES", "SE", "CH", "TR", "UA", "GB",
-                    "VA"
+                    "AL", "AD", "AT", "AM", "BY", "BE", "BA", "BG", "HR", "CY",
+                    "CZ", "CH", "DK", "EE", "FI", "FR", "FO", "DE", "GR", "GE", 
+                    "GI", "HU", "IS", "IE", "IT", "IM", "LV", "LI", "LT", "LU", 
+                    "MT", "MD", "MC", "ME", "NL", "MK", "NO", "PL", "PT", "RO", 
+                    "RU", "RS", "SM", "RS", "SK", "SI", "ES", "SE", "CH", "TR", 
+                    "UA", "GB", "VA", "XK"
                 ]
             },
             {
