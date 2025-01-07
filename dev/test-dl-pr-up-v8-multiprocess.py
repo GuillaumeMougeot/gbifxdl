@@ -18,7 +18,6 @@ from pathlib import Path
 import posixpath
 import hashlib 
 from PIL import Image
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import threading
 from functools import partial
