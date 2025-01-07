@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+# [tool.setuptools]
+# package-dir = {"" = "src"}
+
+[tool.setuptools_scm]
+
+[project]
+name = "gbifxdl"
+dynamic = ["version"]
+dependencies = [
+  "asyncio",
+  "aiofiles",
+  "aiohttp_retry",
+  "asyncssh",
+  "pyarrow",
+  "tqdm",
+  "pillow",
+]
+authors = [
+  {name="Guillaume Mougeot", email="guillaume.mougeot@laposte.net"},
+]
+description = "GBIF downloader."
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+keywords=['GBIF']
+license = { text = "GPLv3" }
+
+[project.optional-dependencies]
+gpu = [
+    "torch",
+    ""
+]
+
+[project.urls]
+"Homepage" = "https://github.com/GuillaumeMougeot/gbifxdl"
+"Bug Tracker" = "https://github.com/GuillaumeMougeot/gbifxdl/issues"
