@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import wget
 
+__all__ = ["Cropper"]
+
 ERDA_MODEL_ZOO_TEMPLATE = "https://anon.erda.au.dk/share_redirect/C1nJdS1jtA/{}"
 
 class Cropper:
