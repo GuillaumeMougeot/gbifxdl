@@ -224,7 +224,7 @@ def poll_status(download_key, wait=True):
     else:
         return poll_once()
 
-def post(payload: str, pwd: str):
+def post(payload: str, pwd: str, wait: bool = True):
     """Use the Occurence API from GBIF to POST a request.
 
     Parameters
@@ -252,7 +252,7 @@ def post(payload: str, pwd: str):
         print(f"Request posted successfully. GBIF is preparing the occurence file for download. Please wait. Download key: {download_key}")
 
         # Polling to check the status of the download
-        poll_status()
+        poll_status(download_key=download_key, wait=wait)
         
     else:
         print(f"Failed to post request. HTTP Status Code: {response.status_code}")
