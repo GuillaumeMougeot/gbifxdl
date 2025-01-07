@@ -37,12 +37,6 @@ class AsyncSFTPParams(TypedDict):
     username: str
     client_keys: list[str]
 
-# class MetadataBuffer(TypedDict):
-#     "filename": str
-#     "hash": str = ""
-#     "width": int = None
-#     "height": int = None
-
 def calculate_image_hash_and_dimensions(img_path):
     """Calculate hash and dimensions of an image."""
     with Image.open(img_path) as img:
