@@ -53,7 +53,9 @@ __all__ = ["post",
     "preprocess_occurrences",
     "config_preprocess_occurrences",
     "preprocess_occurrences_stream",
-    "config_preprocess_occurrences_stream",]
+    "config_preprocess_occurrences_stream",
+    "AsyncSFTPParams",
+    "AsyncImagePipeline"]
 
 # -----------------------------------------------------------------------------
 # Logger
