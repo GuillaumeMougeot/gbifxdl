@@ -494,8 +494,8 @@ class AsyncImagePipeline:
 
 def main():
     downloader = AsyncImagePipeline(
-        parquet_path="data/classif/mini/0013397-241007104925546.parquet",
-        output_dir='data/classif/mini/downloaded_images',
+        parquet_path="/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546.parquet",
+        output_dir='/home/george/codes/gbifxdl/data/classif/mini/downloaded_images',
         url_column='identifier',
         max_concurrent_download=64,
         max_concurrent_processing=32,
@@ -511,7 +511,7 @@ def main():
         batch_size=1024,
         gpu_image_processor = dict(
             fn=Cropper,
-            kwargs=dict(cropper_model_path="data/classif/mini/flat_bug_M.pt")
+            kwargs=dict(cropper_model_path="/home/george/codes/gbifxdl/data/classif/mini/flat_bug_M.pt")
         )
         # cropper=Cropper(
         #     "data/classif/mini/fb_xprize_medium.pt",

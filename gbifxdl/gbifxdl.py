@@ -9,40 +9,40 @@ import zipfile
 from pathlib import Path
 
 import pyarrow.parquet as pq
-import pyarrow.csv as csv
+# import pyarrow.csv as csv
 import pandas as pd
 
 from dwca.read import DwCAReader
 from dwca.darwincore.utils import qualname as qn
 
 import hashlib
-from tqdm import tqdm
+# from tqdm import tqdm
 from tqdm.contrib.concurrent import process_map, thread_map
-from functools import partial
+# from functools import partial
 import logging
 from datetime import datetime
-import sys
-import PIL
-from abc import abstractmethod
+# import sys
+# import PIL
+# from abc import abstractmethod
 
-from concurrent.futures import ThreadPoolExecutor, as_completed, wait
-from PIL import Image
+# from concurrent.futures import ThreadPoolExecutor, as_completed, wait
+# from PIL import Image
 
 from sklearn.model_selection import StratifiedKFold
 
 # WARNING: IOHandler must be configured interactively for the first time
-from pyremotedata.implicit_mount import IOHandler
-import concurrent.futures
-import threading
+# from pyremotedata.implicit_mount import IOHandler
+# import concurrent.futures
+# import threading
 import subprocess
-import queue
-from queue import Queue, Full
-import shutil
+# import queue
+# from queue import Queue, Full
+# import shutil
 
-from urllib.parse import urlparse, unquote
+# from urllib.parse import urlparse, unquote
 
-import dask.dataframe as dd
-from dask import delayed
+# import dask.dataframe as dd
+# from dask import delayed
 
 import pyarrow as pa
 from collections import defaultdict
