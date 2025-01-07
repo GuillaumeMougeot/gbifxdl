@@ -263,7 +263,7 @@ def config_post(config):
     # Check if config has a "pwd" key
     assert "pwd" in config, "No password provided, please provide one using 'pwd' key in the config file or in the command line."
 
-    post(config['payload'], config['pwd'])
+    post(config['payload'], config['pwd'], config.get("wait") is True)
 
 # -----------------------------------------------------------------------------
 # Download the occurence file
