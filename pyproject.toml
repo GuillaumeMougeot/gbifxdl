@@ -11,6 +11,14 @@ packages = ["gbifxdl"]
 name = "gbifxdl"
 dynamic = ["version"]
 dependencies = [
+  "requests",
+  "omegaconf",
+  "pandas",
+  "python-dwca-reader",
+  "tqdm",
+  "scikit-learn",
+  "mmh3",
+  "psutil",
   "asyncio",
   "aiofiles",
   "aiohttp_retry",
