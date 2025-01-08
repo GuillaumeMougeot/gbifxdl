@@ -461,9 +461,9 @@ def preprocess_occurrences(occurrences_path: Path, file_format: str = 'dwca', dr
 
                 for e in extensions:
                     # Do not consider empty URLs
-                    identifier = e.data['http://purl.org/dc/terms/identifier']
+                    identifier = e.data.get('http://purl.org/dc/terms/identifier')
 
-                    if identifier != '':
+                    if identifier is not None and identifier != '':
                         # Add occurrence metadata
                         # This is identical for all multimedia
                         for k,v in row.data.items():
