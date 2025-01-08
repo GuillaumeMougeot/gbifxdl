@@ -1341,7 +1341,6 @@ class AsyncImagePipeline:
             await self.download_process_upload()
         else:
             await self.download_process()
-            # raise NotImplementedError("Not implemented yet")
 
     def run(self):
         asyncio.run(self.pipeline())
