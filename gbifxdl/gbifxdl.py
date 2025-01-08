@@ -185,9 +185,25 @@ def timeit(func):
 # -----------------------------------------------------------------------------
 # Use the Occurence API to get a download file with image URLs
 
-def poll_status(download_key, wait=True):
+def poll_status(download_key: str, wait: bool=True, wait_period: int = 60, wait_timeout: int = 600):
     """With a download key given by the Occurrence API, check the download status.
     Eventually wait if `wait` is True and if download status is one of `"RUNNING"`, `"PENDING"` or `"PREPARING"`.
+
+    Parameters
+    ----------
+    download_key : str
+        Download key of the occurrence file.
+    wait : bool, default=True
+        Whether to wait for the status to differ from `pending`.
+    wait_period : int, default=60
+        Waiting period in seconds.
+    wait_timeout : int, default=600
+        Waiting timeout.
+    
+    Returns
+    -------
+    status : str
+        One of ['pending', 'succeeded', 'failed'].
     """
     def poll_once():
         status_endpoint = f"https://api.gbif.org/v1/occurrence/download/{download_key}"
@@ -202,24 +218,27 @@ def poll_status(download_key, wait=True):
 
             if download_status == "SUCCEEDED":
                 print(f"Download ready! The occurence file will be downloaded with the following key: {download_key}")
-                return download_key
+                return 'succeeded'
             elif download_status in ["RUNNING", "PENDING", "PREPARING"]:
                 print("Download is still processing.")
-                if wait:
-                    print("Checking again in 60 seconds...")
-                    time.sleep(60)  # Wait for 60 seconds before polling again
+                return 'pending'
             else:
                 print(f"Download failed with status: {download_status}")
-                return None
+                return 'failed'
         else:
             print(f"Failed to get download status. HTTP Status Code: {status_response.status_code}")
             print(f"Response Text: {status_response.text}")
-            return None
+            return 'failed'
         
     if wait:
-        while True:
+        status = 'pending'
+        wait_time = 0
+        while wait_time < wait_timeout and status == 'pending':
             status = poll_once()
-            if status is None: break
+            if status == 'pending':
+                print(f"Status is pending. Checking again in {wait_period} seconds...")
+                time.sleep(wait_period)
+                wait_time += wait_period
         return status
     else:
         return poll_once()
@@ -259,7 +278,10 @@ def post(payload: str, pwd: str, wait: bool = True):
         print(f"Request posted successfully. GBIF is preparing the occurence file for download. Please wait. Download key: {download_key}")
 
         # Polling to check the status of the download
-        return poll_status(download_key=download_key, wait=wait)
+        if poll_status(download_key=download_key, wait=wait) == 'succeeded':
+            return download_key
+        else:
+            return None
     else:
         print(f"Failed to post request. HTTP Status Code: {response.status_code}")
         print(f"Response: {response.text}")
