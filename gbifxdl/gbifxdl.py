@@ -33,7 +33,7 @@ import aiofiles
 from aiohttp_retry import RetryClient, ExponentialRetry
 import asyncssh
 from asyncssh import SFTPClient, SFTPError
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from tqdm.asyncio import tqdm
@@ -777,15 +777,6 @@ class AsyncSFTPParams(TypedDict):
     username: str
     client_keys: list[str]
 
-
-def calculate_image_hash_and_dimensions(img_path):
-    """Calculate hash and dimensions of an image."""
-    with Image.open(img_path) as img:
-        img_size = img.size
-        img_hash = hashlib.sha256(img.tobytes()).hexdigest()
-        return img_hash, img_size
-
-
 class AsyncImagePipeline:
     def __init__(
         self,
@@ -1036,11 +1027,28 @@ class AsyncImagePipeline:
                 self.logger.error(f"Error downloading {url}: {e}")
                 return None
 
+    def verify_image(self, img_path):
+        try:
+            with Image.open(img_path) as img:
+                img.verify()  # Verify that it is, in fact, an image
+        except (IOError, SyntaxError, UnidentifiedImageError, Image.DecompressionBombError) as e:
+            self.logger.error(f"Image {img_path} seems corrupted. Aborting processing.")
+            raise e
+
+    def compute_hash_and_dimensions(self, img_path):
+        """Calculate hash and dimensions of an image."""
+        with Image.open(img_path) as img:
+            img_size = img.size
+            img_hash = hashlib.sha256(img.tobytes()).hexdigest()
+            return img_hash, img_size
+
     def process_image(self, filename: str, folder: str, thread_id=None) -> bool:
         """Crop the image, hash the image, get image size, ..."""
         try:
             self.logger.info((self.output_dir, folder, filename))
             img_path = os.path.join(self.output_dir, folder, filename)
+
+            self.verify_image(img_path)
 
             # Crop image
             if self.gpu_image_processor is not None and thread_id is not None:
@@ -1053,7 +1061,7 @@ class AsyncImagePipeline:
                     filename = new_filename
                     img_path = os.path.join(self.output_dir, folder, filename)
 
-            img_hash, img_size = calculate_image_hash_and_dimensions(img_path)
+            img_hash, img_size = self.compute_hash_and_dimensions(img_path)
 
             # Add metadata to buffer
             width, height = img_size[0], img_size[1]
