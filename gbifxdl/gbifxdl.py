@@ -784,6 +784,7 @@ class AsyncImagePipeline:
         output_dir: str,
         url_column: str = "url",
         max_concurrent_download: int = 128,
+        max_download_attempts: int = 10,
         max_concurrent_processing: int = 4,
         max_queue_size: int = 100,
         batch_size: int = 65536,
@@ -816,8 +817,9 @@ class AsyncImagePipeline:
             self.upload_queue = asyncio.Queue(maxsize=max_queue_size)
 
         # Retry options
+        self.max_download_attempts = max_download_attempts
         self.retry_options = retry_options or ExponentialRetry(
-            attempts=10,  # Retry up to 10 times
+            attempts=self.max_download_attemps,  # Retry up to 10 times
             statuses={429, 500, 502, 503, 504},  # Retry on server and rate-limit errors
             start_timeout=10,
         )
@@ -988,6 +990,7 @@ class AsyncImagePipeline:
         url_hash: str,
         form: str,
         folder: str,
+        _num_attempts: int = 0
     ) -> bool:
         """
         Downloads a single image and saves it to the output directory.
@@ -1019,6 +1022,26 @@ class AsyncImagePipeline:
 
                     async with aiofiles.open(full_path, "wb") as f:
                         await f.write(await response.read())
+                    
+                    # Check if the image is corrupted
+                    # Retry download if it is the case
+                    try:
+                        with Image.open(full_path) as img:
+                            img.verify()  # Verify that it is, in fact, an image
+                    except (IOError, SyntaxError, UnidentifiedImageError, Image.DecompressionBombError) as e:
+                        if _num_attempts >= self.max_download_attempts:
+                            self.logger.error(f"Image {full_path} seems corrupted.")
+                            raise e
+                        # Retry if the images is corrupted
+                        self.logger.debug(f"An issue arose while downloading {full_path}. Reattempting...")
+                        return self.download_image(
+                            session,
+                            url,
+                            url_hash,
+                            form,
+                            folder,
+                            _num_attempts+1
+                        )
 
                     self.logger.debug(f"Downloaded: {url}")
                     return filename
@@ -1026,14 +1049,6 @@ class AsyncImagePipeline:
             except Exception as e:
                 self.logger.error(f"Error downloading {url}: {e}")
                 return None
-
-    def verify_image(self, img_path):
-        try:
-            with Image.open(img_path) as img:
-                img.verify()  # Verify that it is, in fact, an image
-        except (IOError, SyntaxError, UnidentifiedImageError, Image.DecompressionBombError) as e:
-            self.logger.error(f"Image {img_path} seems corrupted. Aborting processing.")
-            raise e
 
     def compute_hash_and_dimensions(self, img_path):
         """Calculate hash and dimensions of an image."""
@@ -1047,8 +1062,6 @@ class AsyncImagePipeline:
         try:
             self.logger.info((self.output_dir, folder, filename))
             img_path = os.path.join(self.output_dir, folder, filename)
-
-            self.verify_image(img_path)
 
             # Crop image
             if self.gpu_image_processor is not None and thread_id is not None:
