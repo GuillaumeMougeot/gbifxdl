@@ -1034,7 +1034,7 @@ class AsyncImagePipeline:
                             raise e
                         # Retry if the images is corrupted
                         self.logger.debug(f"An issue arose while downloading {full_path}. Reattempting...")
-                        return self.download_image(
+                        return await self.download_image(
                             session,
                             url,
                             url_hash,
