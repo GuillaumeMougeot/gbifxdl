@@ -6,11 +6,21 @@
 
 from gbifxdl import (
     poll_status,
-    download_occurrences,
-    preprocess_occurrences_stream)
+    download_occurrences,)
+from os.path import join, dirname, realpath
 
 # Replace with your own download key
-download_key = "0060185-241126133413365"
+# download_key = "0060185-241126133413365"
+# download_key = "0061420-241126133413365"
+
+# Load download key from 'download_key.txt'
+def addcwd(path):
+    """Add current Python file workdir to path.
+    """
+    return join(dirname(realpath(__file__)), path)
+
+with open(addcwd('download_key.txt'), 'r') as file:
+    download_key = file.read().strip()
 
 # Poll the POST status and wait if not ready to be downloaded
 status = poll_status(download_key)
