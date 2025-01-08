@@ -26,9 +26,3 @@ else:
     print(f"Download failed because status is {status}.")
     download_path = None
 
-# Preprocess the downloaded file
-if download_path is not None:
-    preprocessed_path = preprocess_occurrences_stream(occurrences_path=download_path)
-
-print(f"Preprocessed file is located here: {preprocessed_path}")
-
