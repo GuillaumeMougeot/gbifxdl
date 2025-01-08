@@ -912,6 +912,11 @@ class AsyncImagePipeline:
             self.devices = [f"cuda:{i}" for i in range(self.num_gpus)]
             self.gpu_image_processor = gpu_image_processor
 
+            # Instantiate the model once to download the model if not present locally
+            self.gpu_image_processor["fn"](
+                device="cpu", **self.gpu_image_processor["kwargs"]
+            )
+
     def get_model(self, thread_id):
         if not hasattr(self.thread_context, "model"):
             # Choose GPU based on thread_id (wrap around the list of GPUs)
