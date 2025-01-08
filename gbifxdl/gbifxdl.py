@@ -333,9 +333,7 @@ def config_post(config):
 # Download the occurence file
 
 
-def download_occurrences(
-    download_key: str, dataset_dir: str, file_format: str = "dwca"
-):
+def download_occurrences(download_key: str, dataset_dir: str, file_format: str = "dwca"):
     """Given a download key, download the occurrence file into dataset directory.
 
     Parameters
@@ -363,9 +361,7 @@ def download_occurrences(
 
     # Check response result
     if download_response.status_code != 200:
-        print(
-            f"Failed to download the occurrence file. HTTP Status Code: {download_response.status_code}"
-        )
+        print(f"Failed to download the occurrence file. HTTP Status Code: {download_response.status_code}")
         return
 
     occurrences_zip = join(dataset_dir, f"{download_key}.zip")
@@ -653,10 +649,8 @@ def preprocess_occurrences_stream(
         for row in dwca:
             img_extensions = []
             for ext in row.extensions:
-                if (
-                    ext.rowtype == gbifqualname + "Multimedia"
-                    and ext.data[mmqualname + "type"] == mediatype
-                ):
+                if (ext.rowtype == gbifqualname + "Multimedia"
+                    and ext.data[mmqualname + "type"] == mediatype):
                     img_extensions.append(ext.data)
 
             media = (
@@ -997,7 +991,12 @@ class AsyncImagePipeline:
             )
 
     async def download_image(
-        self, session: RetryClient, url: str, url_hash: str, form: str
+        self,
+        session: RetryClient,
+        url: str,
+        url_hash: str,
+        form: str,
+        folder: str,
     ) -> bool:
         """
         Downloads a single image and saves it to the output directory.
@@ -1024,7 +1023,7 @@ class AsyncImagePipeline:
 
                     ext = "." + form.split("/")[1]
                     filename = url_hash + ext
-                    full_path = os.path.join(self.output_dir, filename)
+                    full_path = os.path.join(self.output_dir, folder, filename)
                     os.makedirs(os.path.dirname(full_path), exist_ok=True)
 
                     async with aiofiles.open(full_path, "wb") as f:
@@ -1037,10 +1036,11 @@ class AsyncImagePipeline:
                 self.logger.error(f"Error downloading {url}: {e}")
                 return None
 
-    def process_image(self, filename: str, thread_id=None) -> bool:
+    def process_image(self, filename: str, folder: str, thread_id=None) -> bool:
         """Crop the image, hash the image, get image size, ..."""
         try:
-            img_path = os.path.join(self.output_dir, filename)
+            self.logger.info((self.output_dir, folder, filename))
+            img_path = os.path.join(self.output_dir, folder, filename)
 
             # Crop image
             if self.gpu_image_processor is not None and thread_id is not None:
@@ -1051,7 +1051,7 @@ class AsyncImagePipeline:
 
                     # Set up the new filename as the current one
                     filename = new_filename
-                    img_path = os.path.join(self.output_dir, filename)
+                    img_path = os.path.join(self.output_dir, folder, filename)
 
             img_hash, img_size = calculate_image_hash_and_dimensions(img_path)
 
@@ -1086,7 +1086,7 @@ class AsyncImagePipeline:
     ) -> bool:
         async with self.upload_semaphore:
             try:
-                local_path = posixpath.join(self.output_dir, filename)
+                local_path = posixpath.join(self.output_dir, folder, filename)
                 remote_path = posixpath.join(self.remote_dir, folder, filename)
                 self.logger.debug(f"Uploading {local_path} to {remote_path}")
                 assert os.path.isfile(local_path), f"[Error] {local_path} not a file."
@@ -1134,7 +1134,7 @@ class AsyncImagePipeline:
                     }
 
                 await self.download_queue.put(
-                    (url, url_hash, form, folder)
+                    (str(url), str(url_hash), str(form), str(folder))
                 )  # Pauses if queue is full
                 count += 1
 
@@ -1153,7 +1153,7 @@ class AsyncImagePipeline:
 
             url, url_hash, form, folder = item
             try:
-                filename = await self.download_image(session, url, url_hash, form)
+                filename = await self.download_image(session, url, url_hash, form, folder)
                 if filename is not None:
                     await self.processing_queue.put((url_hash, filename, folder))
                     self.download_stats["success"] += 1
@@ -1179,20 +1179,18 @@ class AsyncImagePipeline:
             try:
                 # filename = await self.process_image(filename, processor_id=i)
                 filename, metadata = await asyncio.get_event_loop().run_in_executor(
-                    self.pool, partial(self.process_image, filename, thread_i)
-                )
+                    self.pool, partial(self.process_image, filename, folder, thread_i))
                 async with self.metadata_lock:
                     self._update_metadata(url_hash=url_hash, **metadata)
 
-                if filename is not None:
+                if filename is not None and self.do_upload:
                     # async with self.metadata_lock:
                     #     self._update_metadata(url_hash,  status="processing_success")
                     await self.upload_queue.put((url_hash, filename, folder))
                 else:
                     async with self.metadata_lock:
                         self._update_metadata(
-                            url_hash, status="processing_failed", done=True
-                        )
+                            url_hash, status="processing_failed", done=True)
             finally:
                 self.processing_queue.task_done()
 
@@ -1206,28 +1204,72 @@ class AsyncImagePipeline:
                     sftp, filename, folder
                 ):  # Implement upload logic separately
                     os.remove(
-                        os.path.join(self.output_dir, filename)
+                        join(self.output_dir, folder, filename)
                     )  # Delete local file after successful upload
+                    # Remove empty dir
+                    with os.scandir(join(self.output_dir, folder)) as it:
+                        if not any(it):
+                            os.rmdir(join(self.output_dir, folder))
                     self.upload_stats["success"] += 1
                     async with self.metadata_lock:
                         self._update_metadata(
-                            url_hash, status="uploading_success", done=True
-                        )
+                            url_hash, status="uploading_success", done=True)
                 else:
                     self.upload_stats["failed"] += 1
                     async with self.metadata_lock:
                         self._update_metadata(
-                            url_hash, status="uploading_failed", done=True
-                        )
+                            url_hash, status="uploading_failed", done=True)
 
                 self.upload_progress_bar.set_postfix(
-                    stats=self.upload_stats, refresh=True
-                )
+                    stats=self.upload_stats, refresh=True)
                 self.upload_progress_bar.update(1)
             finally:
                 async with self.metadata_lock:
                     self._write_metadata_to_parquet()
                 self.upload_queue.task_done()
+
+    async def download_process(self):
+        """Minimal version of the pipeline where only the image download is performed.
+        """
+        # Semaphore to limit active downloads
+        self.download_semaphore = asyncio.Semaphore(self.max_concurrent_download)
+        
+        # Progress bar
+        total_items = self.parquet_file.metadata.num_rows  # for the progress bar
+        self.download_progress_bar = tqdm(
+            total=total_items, desc="Downloading Images", unit="image", position=0
+        )
+
+        async with RetryClient(retry_options=self.retry_options) as session:
+            # Launch producer and consumers
+            download_tasks = [
+                asyncio.create_task(self.download_consumer(session))
+                for _ in range(self.max_concurrent_download)
+            ]
+
+            # Use multiprocessing to leverage multi-gpu computation
+            processing_tasks = [
+                asyncio.create_task(self.processing_consumer(i))
+                for i in range(self.max_concurrent_processing)
+            ]
+
+            # Wait for the producer to finish
+            await asyncio.create_task(self.producer())
+
+            # Wait for all tasks to finish
+            await self.download_queue.join()
+            await self.processing_queue.join()
+
+            self.download_progress_bar.close()
+
+            for task in download_tasks + processing_tasks:
+                task.cancel()
+
+        # Write the last bits of metadata
+        while len(self.metadata_buffer) > 0:
+            self._write_metadata_to_parquet()
+
+        self.logger.info("Pipeline completed.")
 
     async def download_process_upload(self):
         """
@@ -1298,7 +1340,8 @@ class AsyncImagePipeline:
         if self.do_upload:
             await self.download_process_upload()
         else:
-            raise NotImplementedError("Not implemented yet")
+            await self.download_process()
+            # raise NotImplementedError("Not implemented yet")
 
     def run(self):
         asyncio.run(self.pipeline())
