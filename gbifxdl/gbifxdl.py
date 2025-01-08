@@ -202,7 +202,7 @@ def poll_status(download_key, wait=True):
 
             if download_status == "SUCCEEDED":
                 print(f"Download ready! The occurence file will be downloaded with the following key: {download_key}")
-                return status_endpoint
+                return download_key
             elif download_status in ["RUNNING", "PENDING", "PREPARING"]:
                 print("Download is still processing.")
                 if wait:
@@ -239,7 +239,7 @@ def post(payload: str, pwd: str, wait: bool = True):
     Returns
     -------
     str
-        Download link of the occurrence file. If any issues arise during posting then return None.
+        Download key of the occurrence file. If any issues arise during posting then return None.
     """
     # API endpoint for occurrence downloads
     api_endpoint = "https://api.gbif.org/v1/occurrence/download/request"
