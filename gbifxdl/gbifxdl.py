@@ -41,13 +41,16 @@ import posixpath
 import threading
 
 import sys
+
 if sys.version_info >= (3, 8):
     from typing import TypedDict  # pylint: disable=no-name-in-module
 else:
     from typing_extensions import TypedDict
 from typing import Optional
 
-__all__ = ["post", "poll_status",
+__all__ = [
+    "post",
+    "poll_status",
     "config_post",
     "download_occurrences",
     "config_download_occurrences",
@@ -56,10 +59,12 @@ __all__ = ["post", "poll_status",
     "preprocess_occurrences_stream",
     "config_preprocess_occurrences_stream",
     "AsyncSFTPParams",
-    "AsyncImagePipeline"]
+    "AsyncImagePipeline",
+]
 
 # -----------------------------------------------------------------------------
 # Logger
+
 
 def set_logger(log_dir=Path("."), suffix=""):
     """Helper function to set up the logging process.
@@ -94,11 +99,13 @@ def set_logger(log_dir=Path("."), suffix=""):
     logger.propagate = False
 
     # Create a file handler
-    file_handler = logging.FileHandler(filename, encoding='utf-8')
+    file_handler = logging.FileHandler(filename, encoding="utf-8")
     file_handler.setLevel(logging.INFO)
 
     # Create a formatter and attach it to the file handler
-    formatter = logging.Formatter('%(asctime)s: %(levelname)s: %(filename)s: %(message)s')
+    formatter = logging.Formatter(
+        "%(asctime)s: %(levelname)s: %(filename)s: %(message)s"
+    )
     file_handler.setFormatter(formatter)
 
     # Add the file handler to the logger
@@ -110,8 +117,10 @@ def set_logger(log_dir=Path("."), suffix=""):
 
     return logger, filename
 
+
 # -----------------------------------------------------------------------------
 # Utils to monitor execution time
+
 
 class TimeMonitor:
     """
@@ -119,7 +128,7 @@ class TimeMonitor:
     -------
 
     monitor = TimeMonitor()
-    
+
     monitor.start("task1")
     time.sleep(1.5)  # Simulating some process
     monitor.stop("task1")
@@ -163,6 +172,7 @@ class TimeMonitor:
         for label, duration in self.durations.items():
             print(f"  {label}: {duration:.4f} seconds")
 
+
 def timeit(func):
     """
     Example
@@ -175,18 +185,24 @@ def timeit(func):
     if __name__ == "__main__":
         example_task()
     """
+
     def wrapper(*args, **kwargs):
         start = time.time()
         result = func(*args, **kwargs)
         end = time.time()
         print(f"{func.__name__} executed in {end - start:.4f} seconds.")
         return result
+
     return wrapper
+
 
 # -----------------------------------------------------------------------------
 # Use the Occurence API to get a download file with image URLs
 
-def poll_status(download_key: str, wait: bool=True, wait_period: int = 60, wait_timeout: int = 600):
+
+def poll_status(
+    download_key: str, wait: bool = True, wait_period: int = 60, wait_timeout: int = 600
+):
     """With a download key given by the Occurrence API, check the download status.
     Eventually wait if `wait` is True and if download status is one of `"RUNNING"`, `"PENDING"` or `"PREPARING"`.
 
@@ -200,12 +216,13 @@ def poll_status(download_key: str, wait: bool=True, wait_period: int = 60, wait_
         Waiting period in seconds.
     wait_timeout : int, default=600
         Waiting timeout.
-    
+
     Returns
     -------
     status : str
         One of ['pending', 'succeeded', 'failed'].
     """
+
     def poll_once():
         status_endpoint = f"https://api.gbif.org/v1/occurrence/download/{download_key}"
         print(f"Polling status from: {status_endpoint}")
@@ -218,31 +235,36 @@ def poll_status(download_key: str, wait: bool=True, wait_period: int = 60, wait_
             print(f"Current status: {download_status}")
 
             if download_status == "SUCCEEDED":
-                print(f"Download ready! The occurence file will be downloaded with the following key: {download_key}")
-                return 'succeeded'
+                print(
+                    f"Download ready! The occurence file will be downloaded with the following key: {download_key}"
+                )
+                return "succeeded"
             elif download_status in ["RUNNING", "PENDING", "PREPARING"]:
                 print("Download is still processing.")
-                return 'pending'
+                return "pending"
             else:
                 print(f"Download failed with status: {download_status}")
-                return 'failed'
+                return "failed"
         else:
-            print(f"Failed to get download status. HTTP Status Code: {status_response.status_code}")
+            print(
+                f"Failed to get download status. HTTP Status Code: {status_response.status_code}"
+            )
             print(f"Response Text: {status_response.text}")
-            return 'failed'
-        
+            return "failed"
+
     if wait:
-        status = 'pending'
+        status = "pending"
         wait_time = 0
-        while wait_time < wait_timeout and status == 'pending':
+        while wait_time < wait_timeout and status == "pending":
             status = poll_once()
-            if status == 'pending':
+            if status == "pending":
                 print(f"Status is pending. Checking again in {wait_period} seconds...")
                 time.sleep(wait_period)
                 wait_time += wait_period
         return status
     else:
         return poll_once()
+
 
 def post(payload: str, pwd: str, wait: bool = True):
     """Use the Occurence API from GBIF to POST a request.
@@ -255,7 +277,7 @@ def post(payload: str, pwd: str, wait: bool = True):
         GBIF password for connection. Username should mentioned in `creator` field in the payload.
     wait : bool, default=True
         Whether to wait for the download to be ready or not.
-    
+
     Returns
     -------
     str
@@ -266,20 +288,29 @@ def post(payload: str, pwd: str, wait: bool = True):
     headers = {"Content-Type": "application/json"}
 
     # Make the POST request to initiate the download
-    with open(payload, 'r') as f:
+    with open(payload, "r") as f:
         payload = json.load(f)
 
     print("Posting occurence request...")
-    response = requests.post(api_endpoint, headers=headers, data=json.dumps(payload), auth=HTTPBasicAuth(payload['creator'], pwd))
+    response = requests.post(
+        api_endpoint,
+        headers=headers,
+        data=json.dumps(payload),
+        auth=HTTPBasicAuth(payload["creator"], pwd),
+    )
 
     # Handle the response based on the 201 status code
-    if response.status_code == 201:  # The correct response for a successful download request
+    if (
+        response.status_code == 201
+    ):  # The correct response for a successful download request
         # download_key = response.json().get("key")
         download_key = response.text
-        print(f"Request posted successfully. GBIF is preparing the occurence file for download. Please wait. Download key: {download_key}")
+        print(
+            f"Request posted successfully. GBIF is preparing the occurence file for download. Please wait. Download key: {download_key}"
+        )
 
         # Polling to check the status of the download
-        if poll_status(download_key=download_key, wait=wait) == 'succeeded':
+        if poll_status(download_key=download_key, wait=wait) == "succeeded":
             return download_key
         else:
             return None
@@ -288,16 +319,23 @@ def post(payload: str, pwd: str, wait: bool = True):
         print(f"Response: {response.text}")
         return None
 
+
 def config_post(config):
     # Check if config has a "pwd" key
-    assert "pwd" in config, "No password provided, please provide one using 'pwd' key in the config file or in the command line."
+    assert (
+        "pwd" in config
+    ), "No password provided, please provide one using 'pwd' key in the config file or in the command line."
 
-    post(config['payload'], config['pwd'], config.get("wait") is True)
+    post(config["payload"], config["pwd"], config.get("wait") is True)
+
 
 # -----------------------------------------------------------------------------
 # Download the occurence file
 
-def download_occurrences(download_key : str, dataset_dir : str, file_format : str = 'dwca'):
+
+def download_occurrences(
+    download_key: str, dataset_dir: str, file_format: str = "dwca"
+):
     """Given a download key, download the occurrence file into dataset directory.
 
     Parameters
@@ -308,7 +346,7 @@ def download_occurrences(download_key : str, dataset_dir : str, file_format : st
         Path where the occurrence file will be downloaded.
     file_format : str, default='dwca'
         Format of the occurrence file. 'dwca' is highly recommended.
-    
+
     Returns
     -------
     occurrence_path : Path
@@ -317,30 +355,34 @@ def download_occurrences(download_key : str, dataset_dir : str, file_format : st
     assert download_key is not None, "No download key provided, please provide one."
 
     # Download the file
-    download_url = f"https://api.gbif.org/v1/occurrence/download/request/{download_key}.zip"
+    download_url = (
+        f"https://api.gbif.org/v1/occurrence/download/request/{download_key}.zip"
+    )
     print(f"Downloading the occurrence file from {download_url}...")
     download_response = requests.get(download_url)
 
     # Check response result
     if download_response.status_code != 200:
-        print(f"Failed to download the occurrence file. HTTP Status Code: {download_response.status_code}")
+        print(
+            f"Failed to download the occurrence file. HTTP Status Code: {download_response.status_code}"
+        )
         return
 
     occurrences_zip = join(dataset_dir, f"{download_key}.zip")
-    with open(occurrences_zip, 'wb') as f:
+    with open(occurrences_zip, "wb") as f:
         f.write(download_response.content)
     print(f"Downloaded the occurrence file to: {occurrences_zip}")
 
     # Unzip the file and remove the .zip if not dwca
     if file_format.lower() != "dwca":
         print("Unzipping occurrence file ")
-        with zipfile.ZipFile(occurrences_zip, 'r') as zip_file:
+        with zipfile.ZipFile(occurrences_zip, "r") as zip_file:
             occurrences_path = join(dataset_dir, f"{download_key}")
             zip_file.extractall(occurrences_path)
 
         # For parquet format, add occurrence.parquet to the path
         if file_format.lower() == "simple_parquet":
-            occurrences_path = join(occurrences_path, 'occurrence.parquet')
+            occurrences_path = join(occurrences_path, "occurrence.parquet")
     else:
         occurrences_path = occurrences_zip
 
@@ -348,12 +390,14 @@ def download_occurrences(download_key : str, dataset_dir : str, file_format : st
 
     return Path(occurrences_path)
 
+
 def config_download_occurrences(config, download_key):
     download_occurrences(
         download_key=download_key,
-        dataset_dir=config['dataset_dir'], 
-        file_format=config['format'], 
-        )
+        dataset_dir=config["dataset_dir"],
+        file_format=config["format"],
+    )
+
 
 # -----------------------------------------------------------------------------
 # Prepare the download file - remove duplicates, limit the number of download per species, remove the columns we don't need, etc.
@@ -367,12 +411,11 @@ KEYS_MULT = [
     "creator",
     "publisher",
     "license",
-    "rightsHolder"
+    "rightsHolder",
 ]
 
 KEYS_OCC = [
     "gbifID",
-
     # Recording metadata
     "basisOfRecord",
     "recordedBy",
@@ -385,32 +428,29 @@ KEYS_OCC = [
     "verbatimLocality",
     "decimalLatitude",
     "decimalLongitude",
-    "coordinateUncertaintyInMeters", 
+    "coordinateUncertaintyInMeters",
     "eventDate",
     "eventTime",
-
     # Individual metadata
     "sex",
     "lifeStage",
-
     # Taxon metadata
-    "acceptedNameUsageID", 
-    "scientificName", 
-    "kingdom", 
-    "phylum", 
-    "class", 
-    "order", 
-    "family", 
+    "acceptedNameUsageID",
+    "scientificName",
+    "kingdom",
+    "phylum",
+    "class",
+    "order",
+    "family",
     "genus",
     "specificEpithet",
     "taxonRank",
     "taxonomicStatus",
-
     # Storage metadata
     "taxonKey",
     "acceptedTaxonKey",
     "datasetKey",
-    ]
+]
 
 KEYS_GBIF = [
     "kingdomKey",
@@ -422,7 +462,13 @@ KEYS_GBIF = [
     "speciesKey",
 ]
 
-def preprocess_occurrences(occurrences_path: Path, file_format: str = 'dwca', drop_duplicates=None, max_img_spc=None):
+
+def preprocess_occurrences(
+    occurrences_path: Path,
+    file_format: str = "dwca",
+    drop_duplicates=None,
+    max_img_spc=None,
+):
     """Prepare the download file - remove duplicates, limit the number of download per species, remove the columns we don't need, etc.
 
     Warning: this function will load a significant part of the data into memory. Use a sufficiently large amount of RAM.
@@ -430,23 +476,25 @@ def preprocess_occurrences(occurrences_path: Path, file_format: str = 'dwca', dr
     Parameters
     ----------
     occurrences_path : Path
-        Path to the occurrence file. 
+        Path to the occurrence file.
     file_format : str
         Format of the occurrence file. File processing differs depending on the file format. Currently only supports `dwca`.
     drop_duplicates : bool, default=None
         Whether to drop the duplicates in the file.
     maz_img_spc : int, default=None
-        Maximum of multimedia file to keep per species. 
+        Maximum of multimedia file to keep per species.
 
     Returns
     -------
     output_path : str
         Path to the preprocessed occurrence file.
     """
-    assert occurrences_path is not None, "No occurence path provided, please provide one."
+    assert (
+        occurrences_path is not None
+    ), "No occurence path provided, please provide one."
 
     print("Preprocessing the occurrence file before download...")
-    if file_format.lower()=="dwca":
+    if file_format.lower() == "dwca":
         with DwCAReader(occurrences_path) as dwca:
             images_metadata = {}
 
@@ -462,58 +510,64 @@ def preprocess_occurrences(occurrences_path: Path, file_format: str = 'dwca', dr
 
                 for e in extensions:
                     # Do not consider empty URLs
-                    identifier = e.data.get('http://purl.org/dc/terms/identifier')
+                    identifier = e.data.get("http://purl.org/dc/terms/identifier")
 
-                    if identifier is not None and identifier != '':
+                    if identifier is not None and identifier != "":
                         # Add occurrence metadata
                         # This is identical for all multimedia
-                        for k,v in row.data.items():
-                            k = k.split('/')[-1]
+                        for k, v in row.data.items():
+                            k = k.split("/")[-1]
                             if k in KEYS_OCC + KEYS_GBIF:
                                 images_metadata[k] += [v]
 
                         # Add extension metadata
-                        for k,v in e.data.items():
-                            k = k.split('/')[-1]
+                        for k, v in e.data.items():
+                            k = k.split("/")[-1]
                             if k in KEYS_MULT:
                                 images_metadata[k] += [v]
     else:
         raise ValueError(f"Unknown format: {file_format.lower()}")
-    
+
     df = pd.DataFrame(images_metadata)
 
     # Remove rows where any of the specified columns are NaN or empty strings
     df = df.dropna(subset=KEYS_GBIF)  # Drop rows with NaN in KEYS_GBIF
-    df = df.loc[~df[KEYS_GBIF].eq('').any(axis=1)]  # Drop rows with empty strings in KEYS_GBIF
-    
+    df = df.loc[
+        ~df[KEYS_GBIF].eq("").any(axis=1)
+    ]  # Drop rows with empty strings in KEYS_GBIF
+
     # Remove duplicates
     if drop_duplicates is not None and drop_duplicates is True:
-        df.drop_duplicates(subset='identifier', keep=False, inplace=True)
+        df.drop_duplicates(subset="identifier", keep=False, inplace=True)
 
     # Limit the number of images per species
     if max_img_spc is not None and max_img_spc > 1:
-        df = df.groupby('taxonKey').filter(lambda x: len(x) <= max_img_spc)
+        df = df.groupby("taxonKey").filter(lambda x: len(x) <= max_img_spc)
 
     # Save the file, next to the original file
     # output_path = occurrences_path.parent / occurrences_path.stem + ".parquet"
     output_path = occurrences_path.with_suffix(".parquet")
-    df.to_parquet(output_path, engine='pyarrow', compression='gzip')
+    df.to_parquet(output_path, engine="pyarrow", compression="gzip")
 
     print(f"Preprocessing done. Preprocessed file stored in {output_path}.")
 
     return output_path
 
+
 def config_preprocess_occurrences(config, occurrences_path: Path):
     preprocess_occurrences(
-        occurrences_path=occurrences_path, 
-        file_format = config['format'], 
-        drop_duplicates = config['drop_duplicates'], 
-        max_img_spc = config['max_img_spc'])
+        occurrences_path=occurrences_path,
+        file_format=config["format"],
+        drop_duplicates=config["drop_duplicates"],
+        max_img_spc=config["max_img_spc"],
+    )
+
 
 def get_memory_usage():
     """Get current process memory usage"""
     process = psutil.Process(os.getpid())
     return process.memory_info().rss / (1024 * 1024)  # MB
+
 
 def preprocess_occurrences_stream(
     dwca_path: str,
@@ -549,7 +603,7 @@ def preprocess_occurrences_stream(
         Whether to delete the DWCA file after processing.
     log_mem : bool, default=False
         Whether to log memory information. For debugging.
-    
+
     Returns
     -------
     output_path : str
@@ -560,9 +614,10 @@ def preprocess_occurrences_stream(
     Parts of this function have been adapted from https://github.com/plantnet/gbif-dl/blob/master/gbif_dl/generators/dwca.py.
     """
     start_time = time.time()
-    
+
     # Memory tracking setup
     memory_log = []
+
     def log_memory(stage):
         if log_mem:
             current_memory = get_memory_usage()
@@ -577,12 +632,14 @@ def preprocess_occurrences_stream(
 
     seen_urls = set()
     species_counts = defaultdict(int)
-    max_img_per_species = max_img_spc if max_img_spc is not None else float('inf')
+    max_img_per_species = max_img_spc if max_img_spc is not None else float("inf")
     chunk_data = defaultdict(list)
     processed_rows = 0
 
-    assert isinstance(dwca_path, (str, Path)), TypeError("Occurrences path must be one of str or Path.")
-    if isinstance(dwca_path, str): 
+    assert isinstance(dwca_path, (str, Path)), TypeError(
+        "Occurrences path must be one of str or Path."
+    )
+    if isinstance(dwca_path, str):
         dwca_path = Path(dwca_path)
     output_path = dwca_path.with_suffix(".parquet")
     parquet_writer = None
@@ -596,14 +653,21 @@ def preprocess_occurrences_stream(
         for row in dwca:
             img_extensions = []
             for ext in row.extensions:
-                if ext.rowtype == gbifqualname + "Multimedia" and ext.data[mmqualname + "type"] == mediatype:
+                if (
+                    ext.rowtype == gbifqualname + "Multimedia"
+                    and ext.data[mmqualname + "type"] == mediatype
+                ):
                     img_extensions.append(ext.data)
 
-            media = [random.choice(img_extensions)] if one_media_per_occurrence else img_extensions
+            media = (
+                [random.choice(img_extensions)]
+                if one_media_per_occurrence
+                else img_extensions
+            )
 
             for selected_img in media:
                 url = selected_img.get(mmqualname + "identifier")
-                
+
                 if not url:
                     continue
 
@@ -613,30 +677,36 @@ def preprocess_occurrences_stream(
                 # 2. For file naming (hex string, more suitable for filenames)
                 # url_hash = format(mmh3.hash128(url)[0], 'x')  # Using first 64 bits of 128-bit hash
                 url_hash = hashlib.sha1(url.encode("utf-8")).hexdigest()
-                
+
                 if dedup_hash in seen_urls:
                     continue
                 seen_urls.add(dedup_hash)
 
-                metadata = {k.split('/')[-1]: v for k, v in row.data.items() 
-                            if k.split('/')[-1] in KEYS_OCC + KEYS_GBIF}
-                
-                metadata.update({
-                    k.split('/')[-1]: v for k, v in selected_img.items() 
-                    if k.split('/')[-1] in KEYS_MULT
-                })
+                metadata = {
+                    k.split("/")[-1]: v
+                    for k, v in row.data.items()
+                    if k.split("/")[-1] in KEYS_OCC + KEYS_GBIF
+                }
+
+                metadata.update(
+                    {
+                        k.split("/")[-1]: v
+                        for k, v in selected_img.items()
+                        if k.split("/")[-1] in KEYS_MULT
+                    }
+                )
 
                 # Add the URL hash to metadata
-                metadata['url_hash'] = url_hash
+                metadata["url_hash"] = url_hash
 
                 # print(f"metadata; {metadata}")
 
                 if any(not metadata.get(key) for key in KEYS_GBIF):
                     continue
 
-                taxon_key = metadata.get('taxonKey')
+                taxon_key = metadata.get("taxonKey")
                 species_counts[taxon_key] += 1
-                
+
                 if species_counts[taxon_key] > max_img_per_species:
                     continue
 
@@ -645,19 +715,21 @@ def preprocess_occurrences_stream(
                     chunk_data[k].append(v)
 
                 # print(f"chunk_data; {chunk_data}")
-                
+
                 processed_rows += 1
 
                 # Write chunk when full
                 if processed_rows % chunk_size == 0:
                     chunk_table = pa.table(chunk_data)
-                    
+
                     if parquet_writer is None:
-                        parquet_writer = pq.ParquetWriter(output_path, chunk_table.schema)
-                    
+                        parquet_writer = pq.ParquetWriter(
+                            output_path, chunk_table.schema
+                        )
+
                     parquet_writer.write_table(chunk_table)
                     chunk_data = defaultdict(list)
-                    
+
                     log_memory(f"After processing {processed_rows} rows")
 
         # Write final chunk if exists
@@ -680,23 +752,37 @@ def preprocess_occurrences_stream(
 
     return output_path
 
-def config_preprocess_occurrences_stream(config, occurrences_path: Path, chunk_size=10000):
+
+def config_preprocess_occurrences_stream(
+    config, occurrences_path: Path, chunk_size=10000
+):
     preprocess_occurrences_stream(
         occurrences_path=occurrences_path,
-        file_format=config['format'],
-        max_img_spc=config['max_img_spc'],
-        chunk_size=chunk_size,)
+        file_format=config["format"],
+        max_img_spc=config["max_img_spc"],
+        chunk_size=chunk_size,
+    )
+
 
 # -----------------------------------------------------------------------------
 # Download the images using the prepared download file
 
-VALID_IMAGE_FORMAT = ('image/png', 'image/jpeg', 'image/gif', 'image/jpg', 'image/tiff', 'image/tif')
+VALID_IMAGE_FORMAT = (
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/jpg",
+    "image/tiff",
+    "image/tif",
+)
+
 
 class AsyncSFTPParams(TypedDict):
     host: str
     port: int
     username: str
     client_keys: list[str]
+
 
 def calculate_image_hash_and_dimensions(img_path):
     """Calculate hash and dimensions of an image."""
@@ -705,12 +791,13 @@ def calculate_image_hash_and_dimensions(img_path):
         img_hash = hashlib.sha256(img.tobytes()).hexdigest()
         return img_hash, img_size
 
+
 class AsyncImagePipeline:
     def __init__(
         self,
         parquet_path: str,
         output_dir: str,
-        url_column: str = 'url',
+        url_column: str = "url",
         max_concurrent_download: int = 128,
         max_concurrent_processing: int = 4,
         max_queue_size: int = 100,
@@ -720,9 +807,9 @@ class AsyncImagePipeline:
         remote_dir: Optional[str] = "/",
         # remove_remote_dir: Optional[bool] = False,
         max_concurrent_upload: Optional[int] = 16,
-        verbose_level: int = 0, # 0 1 2
-        logger = None,
-        gpu_image_processor = None,
+        verbose_level: int = 0,  # 0 1 2
+        logger=None,
+        gpu_image_processor=None,
     ):
         self.parquet_path = Path(parquet_path)
         self.parquet_file = pq.ParquetFile(self.parquet_path)
@@ -734,12 +821,12 @@ class AsyncImagePipeline:
         self.folder_column = "speciesKey"
         self.max_concurrent_download = max_concurrent_download
         self.max_concurrent_processing = max_concurrent_processing
-        self.do_upload = sftp_params is not None 
+        self.do_upload = sftp_params is not None
 
         # Queues for managing pipeline stages
         self.download_queue = asyncio.Queue(maxsize=max_queue_size)
         # Limit the number of local files to avoid downloading the entire dataset locally:
-        self.processing_queue = asyncio.Queue(maxsize=max_queue_size) 
+        self.processing_queue = asyncio.Queue(maxsize=max_queue_size)
         if self.do_upload:
             self.upload_queue = asyncio.Queue(maxsize=max_queue_size)
 
@@ -752,50 +839,60 @@ class AsyncImagePipeline:
 
         # Logging setup
         self.verbose_level = verbose_level
-        if self.verbose_level==2:
+        if self.verbose_level == 2:
             asyncssh.set_debug_level(2)
         if self.verbose_level == 0:
-            logging.getLogger('asyncssh').setLevel(logging.WARNING)
+            logging.getLogger("asyncssh").setLevel(logging.WARNING)
         if logger is None:
             log_file = "pipeline.log"
             self.logger = logging.getLogger(__name__)
-            self.logger.setLevel(logging.DEBUG if self.verbose_level > 0 else logging.INFO)
+            self.logger.setLevel(
+                logging.DEBUG if self.verbose_level > 0 else logging.INFO
+            )
             if not self.logger.handlers:
                 file_handler = logging.FileHandler(log_file)
-                file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s: %(message)s"))
+                file_handler.setFormatter(
+                    logging.Formatter("%(asctime)s - %(levelname)s: %(message)s")
+                )
                 self.logger.addHandler(file_handler)
                 # Optional: Stream Handler to log to console
                 # stream_handler = logging.StreamHandler()
                 # stream_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s: %(message)s"))
                 # self.logger.addHandler(stream_handler)
 
-                self.logger.propagate = False  # Prevent messages from propagating to the root logger
+                self.logger.propagate = (
+                    False  # Prevent messages from propagating to the root logger
+                )
         else:
             self.logger = logger
 
         self.download_progress_bar = None
-        self.download_stats = {"failed":0, "success":0}
+        self.download_stats = {"failed": 0, "success": 0}
         if self.do_upload:
             self.upload_progress_bar = None
-            self.upload_stats = {"failed":0, "success":0}
+            self.upload_stats = {"failed": 0, "success": 0}
 
         # Storing of processing metadata
         self.metadata_writer = None
         # An iterator on the parquet file to store the metadata back into the original parquet file.
-        self.parquet_iter_for_merge = pq.ParquetFile(self.parquet_path).iter_batches(batch_size=self.batch_size)
+        self.parquet_iter_for_merge = pq.ParquetFile(self.parquet_path).iter_batches(
+            batch_size=self.batch_size
+        )
         # Buffer for metadata
         # Is also used to store if a url failed to pass through the entire pipeline
-        # self.metadata_buffer = defaultdict(list) 
+        # self.metadata_buffer = defaultdict(list)
         self.metadata_buffer = [{}]
         # Output Parquet file
-        self.metadata_file = self.parquet_path.parent / (self.parquet_path.stem + "_processing_metadata.parquet")  
+        self.metadata_file = self.parquet_path.parent / (
+            self.parquet_path.stem + "_processing_metadata.parquet"
+        )
         # Metadata index (mdid)
         # if the milestone turns True and if all "done" in the metadata buffer are "True",
         # then the metadata is ready to be written in the output file
-        self.mdid = 0 
+        self.mdid = 0
         self.metadata_lock = asyncio.Lock()
         self.done_count = [0]
-        
+
         # SFTP setup for upload
         if self.do_upload:
             self.sftp_params = sftp_params
@@ -810,27 +907,29 @@ class AsyncImagePipeline:
         self.gpu_image_processor = None
         if gpu_image_processor is not None:
             import torch
+
             self.num_gpus = torch.cuda.device_count()
-            self.devices = [f"cuda:{i}" for i in range(self.num_gpus)] 
+            self.devices = [f"cuda:{i}" for i in range(self.num_gpus)]
             self.gpu_image_processor = gpu_image_processor
-            
+
     def get_model(self, thread_id):
         if not hasattr(self.thread_context, "model"):
             # Choose GPU based on thread_id (wrap around the list of GPUs)
             device = self.devices[thread_id % self.num_gpus]
             self.logger.info(f"Initializing model on {device} for thread {thread_id}")
-            
+
             # Initialize model and move to the selected device
-            model = self.gpu_image_processor['fn'](device=device, **self.gpu_image_processor['kwargs'])
-            
+            model = self.gpu_image_processor["fn"](
+                device=device, **self.gpu_image_processor["kwargs"]
+            )
+
             # Store model and device in thread-local context
             self.thread_context.model = model
 
         return self.thread_context.model
 
     def _update_metadata(self, url_hash, **kwargs):
-        """Must be called within the metadata lock.
-        """
+        """Must be called within the metadata lock."""
         try:
             i = 0
             while i < len(self.metadata_buffer):
@@ -842,31 +941,42 @@ class AsyncImagePipeline:
                     break
                 else:
                     i += 1
-            
+
         except KeyError:
-            self.logger.error(f"KeyError: Wrong key {url_hash} or {kwargs} could not update metadata.")
+            self.logger.error(
+                f"KeyError: Wrong key {url_hash} or {kwargs} could not update metadata."
+            )
 
     def _write_metadata_to_parquet(self):
         """Write the buffered metadata to a Parquet file."""
         # Check that we have more than one element in the metadata buffer
-        # and check if all 'status' have been updated 
+        # and check if all 'status' have been updated
         if self.done_count[0] == len(self.metadata_buffer[0]):
-            self.logger.debug(f"Ready to write [{self.done_count}/{[len(s) for s in self.metadata_buffer]}]")
+            self.logger.debug(
+                f"Ready to write [{self.done_count}/{[len(s) for s in self.metadata_buffer]}]"
+            )
             try:
                 if self.done_count[0] > 0:
-                    metadata_list = [dict({'url_hash':k},**v) for k,v in self.metadata_buffer[0].items()]
+                    metadata_list = [
+                        dict({"url_hash": k}, **v)
+                        for k, v in self.metadata_buffer[0].items()
+                    ]
                     table = pa.Table.from_pylist(metadata_list)
-                    
+
                     # Get a batch of the original data
-                    original_table = pa.Table.from_batches([next(self.parquet_iter_for_merge)])
+                    original_table = pa.Table.from_batches(
+                        [next(self.parquet_iter_for_merge)]
+                    )
 
                     # Merge the original data with new metadata
                     # Left outer join, but as we should have a perfect match
                     # between left and right, join type should not matter.
-                    marged_table = original_table.join(table, 'url_hash')
+                    marged_table = original_table.join(table, "url_hash")
 
                     if self.metadata_writer is None:
-                        self.metadata_writer = pq.ParquetWriter(self.metadata_file, marged_table.schema)
+                        self.metadata_writer = pq.ParquetWriter(
+                            self.metadata_file, marged_table.schema
+                        )
 
                     self.metadata_writer.write_table(marged_table)
 
@@ -877,9 +987,13 @@ class AsyncImagePipeline:
             except Exception as e:
                 self.logger.error(f"Error while writing metadata: {e}")
         else:
-            self.logger.debug(f"Not ready yet [{self.done_count}/{[len(s) for s in self.metadata_buffer]}]")
+            self.logger.debug(
+                f"Not ready yet [{self.done_count}/{[len(s) for s in self.metadata_buffer]}]"
+            )
 
-    async def download_image(self, session: RetryClient, url: str, url_hash: str, form: str) -> bool:
+    async def download_image(
+        self, session: RetryClient, url: str, url_hash: str, form: str
+    ) -> bool:
         """
         Downloads a single image and saves it to the output directory.
         """
@@ -891,19 +1005,24 @@ class AsyncImagePipeline:
                     # Check image type
                     if form not in VALID_IMAGE_FORMAT:
                         # Attempting to get it from the url
-                        if response.headers['content-type'].lower() not in VALID_IMAGE_FORMAT:
-                            error_msg = "Invalid image type {} (in csv) and {} (in content-type) for url {}.".format(form, response.headers['content-type'], url)
+                        if (
+                            response.headers["content-type"].lower()
+                            not in VALID_IMAGE_FORMAT
+                        ):
+                            error_msg = "Invalid image type {} (in csv) and {} (in content-type) for url {}.".format(
+                                form, response.headers["content-type"], url
+                            )
                             self.logger.error(error_msg)
                             # raise ValueError(error_msg)
                         else:
-                            form = response.headers['content-type'].lower()
+                            form = response.headers["content-type"].lower()
 
                     ext = "." + form.split("/")[1]
                     filename = url_hash + ext
                     full_path = os.path.join(self.output_dir, filename)
                     os.makedirs(os.path.dirname(full_path), exist_ok=True)
 
-                    async with aiofiles.open(full_path, 'wb') as f:
+                    async with aiofiles.open(full_path, "wb") as f:
                         await f.write(await response.read())
 
                     self.logger.debug(f"Downloaded: {url}")
@@ -913,9 +1032,8 @@ class AsyncImagePipeline:
                 self.logger.error(f"Error downloading {url}: {e}")
                 return None
 
-    def process_image(self, filename: str, thread_id = None) -> bool: 
-        """Crop the image, hash the image, get image size, ...
-        """
+    def process_image(self, filename: str, thread_id=None) -> bool:
+        """Crop the image, hash the image, get image size, ..."""
         try:
             img_path = os.path.join(self.output_dir, filename)
 
@@ -934,7 +1052,7 @@ class AsyncImagePipeline:
 
             # Add metadata to buffer
             width, height = img_size[0], img_size[1]
-            
+
             metadata = {
                 "filename": filename,
                 "img_hash": img_hash,
@@ -946,7 +1064,7 @@ class AsyncImagePipeline:
             return filename, metadata
         except Exception as e:
             self.logger.error(f"Error while processing image: {e}")
-            
+
             # Error metadata
             metadata = {
                 "filename": filename,
@@ -954,24 +1072,28 @@ class AsyncImagePipeline:
                 "width": None,
                 "height": None,
                 "status": "processing_failed",
-                "done": True
+                "done": True,
             }
             return None, metadata
-    
-    async def upload_image(self, sftp: SFTPClient, filename: str, folder: str = "") -> bool:
+
+    async def upload_image(
+        self, sftp: SFTPClient, filename: str, folder: str = ""
+    ) -> bool:
         async with self.upload_semaphore:
             try:
                 local_path = posixpath.join(self.output_dir, filename)
                 remote_path = posixpath.join(self.remote_dir, folder, filename)
                 self.logger.debug(f"Uploading {local_path} to {remote_path}")
                 assert os.path.isfile(local_path), f"[Error] {local_path} not a file."
-                await sftp.makedirs(posixpath.join(self.remote_dir, folder), exist_ok=True)
-                await sftp.put(local_path,remote_path)
+                await sftp.makedirs(
+                    posixpath.join(self.remote_dir, folder), exist_ok=True
+                )
+                await sftp.put(local_path, remote_path)
                 self.logger.debug(f"Uploaded: {filename}")
 
                 return True
             except (OSError, SFTPError, asyncssh.Error) as exc:
-                self.logger.error('SFTP operation failed: ' + str(exc))
+                self.logger.error("SFTP operation failed: " + str(exc))
                 return False
 
     # Supply chain methods
@@ -979,20 +1101,22 @@ class AsyncImagePipeline:
         """Produces a limited number of tasks for the download queue."""
 
         # DEBUG: below
-        limit = float('inf')  # Stop after 100 rows
+        limit = float("inf")  # Stop after 100 rows
         # limit = 70  # Stop after N rows, WARNING: it must be a multiple of batch_size! (for metadata writing integrity)
         count = 0  # Track how many rows have been processed
 
-        for i, batch in enumerate(self.parquet_file.iter_batches(batch_size=self.batch_size)):
+        for i, batch in enumerate(
+            self.parquet_file.iter_batches(batch_size=self.batch_size)
+        ):
             urls = batch[self.url_column].to_pylist()
             formats = batch[self.url_column].to_pylist()
             url_hashes = batch[self.hash_column].to_pylist()
             folders = batch[self.folder_column].to_pylist()
-            
+
             for url, url_hash, form, folder in zip(urls, url_hashes, formats, folders):
                 if count >= limit:
                     break  # Stop producing once the limit is reached
-                
+
                 # Add metadata default values
                 async with self.metadata_lock:
                     self.metadata_buffer[self.mdid][url_hash] = {
@@ -1004,9 +1128,11 @@ class AsyncImagePipeline:
                         "done": False,
                     }
 
-                await self.download_queue.put((url, url_hash, form, folder))  # Pauses if queue is full
+                await self.download_queue.put(
+                    (url, url_hash, form, folder)
+                )  # Pauses if queue is full
                 count += 1
-            
+
             # Turn the metadata milestone to True
             async with self.metadata_lock:
                 self.metadata_buffer += [{}]
@@ -1019,7 +1145,7 @@ class AsyncImagePipeline:
     async def download_consumer(self, session: RetryClient):
         while True:
             item = await self.download_queue.get()
-            
+
             url, url_hash, form, folder = item
             try:
                 filename = await self.download_image(session, url, url_hash, form)
@@ -1027,13 +1153,17 @@ class AsyncImagePipeline:
                     await self.processing_queue.put((url_hash, filename, folder))
                     self.download_stats["success"] += 1
                     async with self.metadata_lock:
-                        self._update_metadata(url_hash,  status="downloading_success")
+                        self._update_metadata(url_hash, status="downloading_success")
                 else:
                     self.download_stats["failed"] += 1
                     async with self.metadata_lock:
-                        self._update_metadata(url_hash,  status="downloading_failed", done=True)
-                
-                self.download_progress_bar.set_postfix(stats=self.download_stats, refresh=True)
+                        self._update_metadata(
+                            url_hash, status="downloading_failed", done=True
+                        )
+
+                self.download_progress_bar.set_postfix(
+                    stats=self.download_stats, refresh=True
+                )
                 self.download_progress_bar.update(1)
             finally:
                 self.download_queue.task_done()
@@ -1044,7 +1174,8 @@ class AsyncImagePipeline:
             try:
                 # filename = await self.process_image(filename, processor_id=i)
                 filename, metadata = await asyncio.get_event_loop().run_in_executor(
-                    self.pool, partial(self.process_image, filename, thread_i))
+                    self.pool, partial(self.process_image, filename, thread_i)
+                )
                 async with self.metadata_lock:
                     self._update_metadata(url_hash=url_hash, **metadata)
 
@@ -1054,7 +1185,9 @@ class AsyncImagePipeline:
                     await self.upload_queue.put((url_hash, filename, folder))
                 else:
                     async with self.metadata_lock:
-                        self._update_metadata(url_hash,  status="processing_failed", done=True)
+                        self._update_metadata(
+                            url_hash, status="processing_failed", done=True
+                        )
             finally:
                 self.processing_queue.task_done()
 
@@ -1064,17 +1197,27 @@ class AsyncImagePipeline:
             url_hash, filename, folder = await self.upload_queue.get()
 
             try:
-                if await self.upload_image(sftp, filename, folder):  # Implement upload logic separately
-                    os.remove(os.path.join(self.output_dir,filename))  # Delete local file after successful upload
+                if await self.upload_image(
+                    sftp, filename, folder
+                ):  # Implement upload logic separately
+                    os.remove(
+                        os.path.join(self.output_dir, filename)
+                    )  # Delete local file after successful upload
                     self.upload_stats["success"] += 1
                     async with self.metadata_lock:
-                        self._update_metadata(url_hash,  status="uploading_success", done=True)
+                        self._update_metadata(
+                            url_hash, status="uploading_success", done=True
+                        )
                 else:
                     self.upload_stats["failed"] += 1
                     async with self.metadata_lock:
-                        self._update_metadata(url_hash,  status="uploading_failed", done=True)
-                
-                self.upload_progress_bar.set_postfix(stats=self.upload_stats, refresh=True)
+                        self._update_metadata(
+                            url_hash, status="uploading_failed", done=True
+                        )
+
+                self.upload_progress_bar.set_postfix(
+                    stats=self.upload_stats, refresh=True
+                )
                 self.upload_progress_bar.update(1)
             finally:
                 async with self.metadata_lock:
@@ -1094,20 +1237,26 @@ class AsyncImagePipeline:
         self.upload_semaphore = asyncio.Semaphore(self.max_concurrent_upload)
 
         # Progress bar
-        total_items = self.parquet_file.metadata.num_rows # for the progress bar
-        self.download_progress_bar = tqdm(total=total_items, desc="Downloading Images", unit="image", position=0)
-        self.upload_progress_bar = tqdm(total=total_items, desc="Uploading Images", unit="image", position=1)
+        total_items = self.parquet_file.metadata.num_rows  # for the progress bar
+        self.download_progress_bar = tqdm(
+            total=total_items, desc="Downloading Images", unit="image", position=0
+        )
+        self.upload_progress_bar = tqdm(
+            total=total_items, desc="Uploading Images", unit="image", position=1
+        )
 
         async with RetryClient(retry_options=self.retry_options) as session:
             # Launch producer and consumers
             download_tasks = [
                 asyncio.create_task(self.download_consumer(session))
-                for _ in range(self.max_concurrent_download)]
+                for _ in range(self.max_concurrent_download)
+            ]
 
             # Use multiprocessing to leverage multi-gpu computation
             processing_tasks = [
                 asyncio.create_task(self.processing_consumer(i))
-                for i in range(self.max_concurrent_processing)]
+                for i in range(self.max_concurrent_processing)
+            ]
 
             # if self.sftp_params is not None:
             async with asyncssh.connect(**self.sftp_params) as conn:
@@ -1117,8 +1266,9 @@ class AsyncImagePipeline:
                     await sftp.makedirs(self.remote_dir, exist_ok=True)
                     upload_tasks = [
                         asyncio.create_task(self.upload_consumer(sftp))
-                        for _ in range(self.max_concurrent_upload)]
-                    
+                        for _ in range(self.max_concurrent_upload)
+                    ]
+
                     # Wait for the producer to finish
                     await asyncio.create_task(self.producer())
 
@@ -1126,14 +1276,14 @@ class AsyncImagePipeline:
                     await self.download_queue.join()
                     await self.processing_queue.join()
                     await self.upload_queue.join()
-                    
+
                     self.download_progress_bar.close()
                     self.upload_progress_bar.close()
 
                     for task in download_tasks + processing_tasks + upload_tasks:
                         task.cancel()
-                    
-        # Write the last bits of metadata 
+
+        # Write the last bits of metadata
         while len(self.metadata_buffer) > 0:
             self._write_metadata_to_parquet()
 
@@ -1144,23 +1294,25 @@ class AsyncImagePipeline:
             await self.download_process_upload()
         else:
             raise NotImplementedError("Not implemented yet")
-        
+
     def run(self):
         asyncio.run(self.pipeline())
 
+
 # -----------------------------------------------------------------------------
-# Clean the dataset 
+# Clean the dataset
 # - remove corrupted images and duplicates
 # - remove empty folders
 # - update the occurrence file
 # - add a column for cross-validation
 
+
 def dropna(occurrences: Path):
-    """Remove None rows in the dictionary.
-    """
+    """Remove None rows in the dictionary."""
     df = pd.read_parquet(occurrences)
-    df = df.dropna(subset='filename')
-    df.to_parquet(occurrences, engine='pyarrow', compression='gzip')
+    df = df.dropna(subset="filename")
+    df.to_parquet(occurrences, engine="pyarrow", compression="gzip")
+
 
 def check_duplicates(config, occurrences: Path):
     """Finds and removes original and duplicate images if they are in different subfolders."""
@@ -1169,37 +1321,51 @@ def check_duplicates(config, occurrences: Path):
 
     df = pd.read_parquet(occurrences)
     removed_files = []
-    removed_files_log = Path(config['dataset_dir']) / 'removed_files.log'
-    removed_files_logger=open(removed_files_log, 'w')
+    removed_files_log = Path(config["dataset_dir"]) / "removed_files.log"
+    removed_files_logger = open(removed_files_log, "w")
 
-    do_remote = 'remote_dir' in config.keys() and config['remote_dir'] is not None
+    do_remote = "remote_dir" in config.keys() and config["remote_dir"] is not None
     # if do_remote:
     #     o = urlparse(config['remote_dir'])
     #     remote_dir = Path(o.path)
     #     sftp_server = f"{o.scheme}://{o.netloc}"
     # else:
-    img_dir = Path(config['dataset_dir']) / 'images'
+    img_dir = Path(config["dataset_dir"]) / "images"
 
     def remove_files(group):
         for index, row in group.iterrows():
             if do_remote:
-                file_path = config['remote_dir'] + "/" + str(row['speciesKey']) + "/" + row['filename']
-                lftp_command = f'lftp -c rm {file_path}'
+                file_path = (
+                    config["remote_dir"]
+                    + "/"
+                    + str(row["speciesKey"])
+                    + "/"
+                    + row["filename"]
+                )
+                lftp_command = f"lftp -c rm {file_path}"
                 print(f"Removed {file_path}")
                 # lftp_command = f'lftp -e "open {stfp_server}; put {img_path} -o {remote_img_path}; bye"'
                 # TODO: fix this: subprocess.CalledProcessError: Command 'lftp -c rm sftp://gmo@ecos.au.dk:@io.erda.au.dk/datasets/test3/5133088/84da5700ecc150bc27104363cad17fc7e21ea20d.jpeg' returned non-zero exit status 1.
-                result = subprocess.run(lftp_command, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                result = subprocess.run(
+                    lftp_command,
+                    shell=True,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
             else:
-                file_path = img_dir/Path(str(row['speciesKey']))/Path(row['filename'])
-                if config['remove_duplicates'] and os.path.exists(file_path):
+                file_path = (
+                    img_dir / Path(str(row["speciesKey"])) / Path(row["filename"])
+                )
+                if config["remove_duplicates"] and os.path.exists(file_path):
                     os.remove(file_path)
             removed_files.append(file_path)
             removed_files_logger.write(f"{file_path}\n")
 
     # Function to process duplicates based on heuristic
     def process_duplicates(group):
-        if group['speciesKey'].nunique() == 1:
-            remove_files(group.iloc[1:]) 
+        if group["speciesKey"].nunique() == 1:
+            remove_files(group.iloc[1:])
             # # Only one speciesKey, keep one row, delete the duplicates' files
             # for index, row in group.iloc[1:].iterrows():  # Keep the first row, delete the rest
             #     if do_remote:
@@ -1214,7 +1380,7 @@ def check_duplicates(config, occurrences: Path):
             #             os.remove(file_path)
             #     removed_files.append(file_path)
             return group.iloc[:1]  # Keep only the first row
-        
+
         else:
             # Multiple speciesKey, remove all rows and delete associated files
             remove_files(group)
@@ -1223,15 +1389,17 @@ def check_duplicates(config, occurrences: Path):
             #     if config['remove_duplicates'] and os.path.exists(file_path):
             #         os.remove(file_path)
             #     removed_files.append(file_path)
-            
+
             # Return an empty DataFrame for this group
             return pd.DataFrame(columns=group.columns)
 
     # Apply the function to each group of sha256
-    df = df.groupby('sha256', group_keys=False)[list(df.keys())].apply(process_duplicates)
+    df = df.groupby("sha256", group_keys=False)[list(df.keys())].apply(
+        process_duplicates
+    )
 
     # Stores the results
-    df.to_parquet(occurrences, engine='pyarrow', compression='gzip')
+    df.to_parquet(occurrences, engine="pyarrow", compression="gzip")
 
     print(f"{len(removed_files)} duplicates were removed.")
 
@@ -1244,8 +1412,9 @@ def check_duplicates(config, occurrences: Path):
     #     for file in removed_files:
     #         f.write(f"{file}\n")
 
+
 def remove_empty_folders(config):
-    img_dir = Path(config['dataset_dir']) / 'images'
+    img_dir = Path(config["dataset_dir"]) / "images"
 
     # Iterate through all the subdirectories and files recursively
     for foldername, subfolders, filenames in os.walk(img_dir, topdown=False):
@@ -1257,6 +1426,7 @@ def remove_empty_folders(config):
             except OSError as e:
                 print(f"Error removing {foldername}: {e}")
 
+
 def get_image_paths(folder):
     """
     Recursively collect all image file paths in a folder.
@@ -1265,17 +1435,21 @@ def get_image_paths(folder):
     image_paths = []
     for root, _, files in os.walk(folder):
         for file in files:
-            if file.lower().endswith(('.png', '.jpg', '.jpeg', '.tiff', '.bmp', '.gif')):
+            if file.lower().endswith(
+                (".png", ".jpg", ".jpeg", ".tiff", ".bmp", ".gif")
+            ):
                 image_paths.append(os.path.join(root, file))
     return image_paths
 
+
 def check_integrity(config, occurrences):
-    """Check if there are as many rows in occurrences as images in img_dir.
-    """
-    img_dir = Path(config['dataset_dir']) / 'images'
+    """Check if there are as many rows in occurrences as images in img_dir."""
+    img_dir = Path(config["dataset_dir"]) / "images"
     df = pd.read_parquet(occurrences)
 
-    df_paths = [str(img_dir / row['speciesKey'] / row['filename']) for i, row in df.iterrows()]
+    df_paths = [
+        str(img_dir / row["speciesKey"] / row["filename"]) for i, row in df.iterrows()
+    ]
     df_set = set(df_paths)
 
     local_set = set(get_image_paths(img_dir))
@@ -1284,19 +1458,21 @@ def check_integrity(config, occurrences):
     local_to_remove = local_set - df_set
 
     if len(df_to_remove) > 0:
-        print(f"Some rows ({len(df_to_remove)} rows) in the occurrence file do not correspond to the local file.")
+        print(
+            f"Some rows ({len(df_to_remove)} rows) in the occurrence file do not correspond to the local file."
+        )
 
     # Remove local files
     for f in local_to_remove:
         os.remove(f)
-    
+
     # Remove df rows
-    df = df[~df['filename'].isin(set(str(Path(p).name) for p in df_to_remove))]
-    
+    df = df[~df["filename"].isin(set(str(Path(p).name) for p in df_to_remove))]
+
     # final_check = get_image_paths(img_dir)
     # assert len(df)==len(final_check), f"{len(df)}!={len(final_check)}"
 
-    df.to_parquet(occurrences, engine='pyarrow', compression='gzip')
+    df.to_parquet(occurrences, engine="pyarrow", compression="gzip")
 
 
 # def add_set_column(df, ood_th, shuffle=True, seed=None):
@@ -1306,45 +1482,48 @@ def add_set_column(config, occurrences):
     There are two test sets:
     * test_ood with species that have less than ood_th images and are considered as out of distribution
     * test_in with species in the distribution.
-    
+
     Species with more than ood_th images are split in 5:
     * One set is the test_in
     * Sets 0-3 are validation sets. This is thus a 4-fold splitting.
     """
 
-    ood_th = config['ood_th']
-    seed = config['seed']
+    ood_th = config["ood_th"]
+    seed = config["seed"]
 
     # Read occurrences
     df = pd.read_parquet(occurrences)
 
     # Count the number of filenames per speciesKey
-    species_counts = df['speciesKey'].value_counts()
-    
+    species_counts = df["speciesKey"].value_counts()
+
     # Identify species with less than ood_th filenames
     ood_species = species_counts[species_counts < ood_th].index
-    
+
     # Create a new 'set' column and initialize it with None
-    df['set'] = None
-    
+    df["set"] = None
+
     # Label rows with 'test_ood' for species with less than ood_th filenames
-    df.loc[df['speciesKey'].isin(ood_species), 'set'] = 'test_ood'
-    
+    df.loc[df["speciesKey"].isin(ood_species), "set"] = "test_ood"
+
     # Filter out the ood species for the remaining processing
-    remaining_df = df[~df['speciesKey'].isin(ood_species)]
-    
+    remaining_df = df[~df["speciesKey"].isin(ood_species)]
+
     # Initialize StratifiedKFold with 5 splits
     skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
-    
+
     # Assign fold numbers (0 to 4) to each row
-    for fold, (_, test_index) in enumerate(skf.split(remaining_df, remaining_df['speciesKey'])):
+    for fold, (_, test_index) in enumerate(
+        skf.split(remaining_df, remaining_df["speciesKey"])
+    ):
         if fold == 0:
-            df.loc[remaining_df.index[test_index], 'set'] = 'test_in'
+            df.loc[remaining_df.index[test_index], "set"] = "test_in"
         else:
-            df.loc[remaining_df.index[test_index], 'set'] = str(fold-1)
-    
+            df.loc[remaining_df.index[test_index], "set"] = str(fold - 1)
+
     # Save back the file
-    df.to_parquet(occurrences, engine='pyarrow', compression='gzip')
+    df.to_parquet(occurrences, engine="pyarrow", compression="gzip")
+
 
 def postprocessing(config, occurrences):
     # Remove None images listed in occurrences (corrupted files, etc.)
@@ -1361,15 +1540,17 @@ def postprocessing(config, occurrences):
     remove_empty_folders(config)
 
     # Check if there are as many files as there are rows in the dataframe
-    if 'remote_dir' not in config.keys() or config['remote_dir'] is None:
+    if "remote_dir" not in config.keys() or config["remote_dir"] is None:
         check_integrity(config, occurrences)
 
     # Add cross-validation column
-    if 'add_cv_col' in config.keys() and config['add_cv_col']:
+    if "add_cv_col" in config.keys() and config["add_cv_col"]:
         add_set_column(config, occurrences)
+
 
 # -----------------------------------------------------------------------------
 # Config and main
+
 
 def load_config():
     cli_config = OmegaConf.from_cli()
@@ -1377,12 +1558,14 @@ def load_config():
     config = OmegaConf.merge(cli_config, yml_config)
     return config
 
+
 def create_save_dir(config):
-    os.makedirs(config['dataset_dir'], exist_ok=True)
+    os.makedirs(config["dataset_dir"], exist_ok=True)
+
 
 def main():
     # Load the configuration
-    config=load_config()
+    config = load_config()
 
     # Create the output folders hierarchy
     create_save_dir(config)
@@ -1399,7 +1582,9 @@ def main():
     # Preprocess the occurrence file
     # preprocessed_occurrences = preprocess_occurrences(config, occurrences_path)
     # preprocessed_occurrences = preprocess_occurrences_dask(config, occurrences_path)
-    preprocessed_occurrences = config_preprocess_occurrences_stream(config, occurrences_path)
+    preprocessed_occurrences = config_preprocess_occurrences_stream(
+        config, occurrences_path
+    )
     # preprocessed_occurrences = Path("/mnt/c/Users/au761367/OneDrive - Aarhus universitet/Codes/python/gbifxdl/data/classif/mini/0013397-241007104925546.parquet")
     # postprocessing(config, preprocessed_occurrences)
 
