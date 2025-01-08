@@ -1,12 +1,11 @@
-
 import psutil
 import time
 from collections import defaultdict
-import os 
-from pathlib import Path 
+import os
+from pathlib import Path
 from dwca.read import DwCAReader
 import mmh3
-import hashlib 
+import hashlib
 import pyarrow as pa
 import pyarrow.parquet as pq
 from typing import Optional
@@ -21,12 +20,11 @@ KEYS_MULT = [
     "creator",
     "publisher",
     "license",
-    "rightsHolder"
+    "rightsHolder",
 ]
 
 KEYS_OCC = [
     "gbifID",
-
     # Recording metadata
     "basisOfRecord",
     "recordedBy",
@@ -39,32 +37,29 @@ KEYS_OCC = [
     "verbatimLocality",
     "decimalLatitude",
     "decimalLongitude",
-    "coordinateUncertaintyInMeters", 
+    "coordinateUncertaintyInMeters",
     "eventDate",
     "eventTime",
-
     # Individual metadata
     "sex",
     "lifeStage",
-
     # Taxon metadata
-    "acceptedNameUsageID", 
-    "scientificName", 
-    "kingdom", 
-    "phylum", 
-    "class", 
-    "order", 
-    "family", 
+    "acceptedNameUsageID",
+    "scientificName",
+    "kingdom",
+    "phylum",
+    "class",
+    "order",
+    "family",
     "genus",
     "specificEpithet",
     "taxonRank",
     "taxonomicStatus",
-
     # Storage metadata
     "taxonKey",
     "acceptedTaxonKey",
     "datasetKey",
-    ]
+]
 
 KEYS_GBIF = [
     "kingdomKey",
@@ -76,10 +71,12 @@ KEYS_GBIF = [
     "speciesKey",
 ]
 
+
 def get_memory_usage():
     """Get current process memory usage"""
     process = psutil.Process(os.getpid())
     return process.memory_info().rss / (1024 * 1024)  # MB
+
 
 def preprocess_occurrences_stream(
     dwca_path: str,
@@ -91,10 +88,13 @@ def preprocess_occurrences_stream(
     delete: Optional[bool] = False,
     log_mem: Optional[bool] = False,
 ) -> str:
-    """Process DWCA to retrieve only relevant information and store it in a Parquet file.
+    """Process DWCA to retrieve only relevant information and store it in a
+    Parquet file.
 
-    Streams through the DWCA and works with chunks for storing to avoid loading the entire file into memory.
-    Include a deduplicate routine, based on hashing URL with mmh3, to remove duplicated URLs.
+    Streams through the DWCA and works with chunks for storing to avoid loading
+    the entire file into memory.
+    Include a deduplicate routine, based on hashing URL with mmh3, to remove
+    duplicated URLs.
     Store the URL hashes in the Parquet file in `url_hash` column.
 
     Parameters
@@ -115,16 +115,17 @@ def preprocess_occurrences_stream(
         Whether to delete the DWCA file after processing.
     log_mem : bool, default=False
         Whether to log memory information. For debugging.
-    
+
     Returns
     -------
     output_path : str
         Path to the preprocessed occurrence file.
     """
     start_time = time.time()
-    
+
     # Memory tracking setup
     memory_log = []
+
     def log_memory(stage):
         if log_mem:
             current_memory = get_memory_usage()
@@ -139,12 +140,14 @@ def preprocess_occurrences_stream(
 
     seen_urls = set()
     species_counts = defaultdict(int)
-    max_img_per_species = max_img_spc if max_img_spc is not None else float('inf')
+    max_img_per_species = max_img_spc if max_img_spc is not None else float("inf")
     chunk_data = defaultdict(list)
     processed_rows = 0
 
-    assert isinstance(dwca_path, (str, Path)), TypeError("Occurrences path must be one of str or Path.")
-    if isinstance(dwca_path, str): 
+    assert isinstance(dwca_path, (str, Path)), TypeError(
+        "Occurrences path must be one of str or Path."
+    )
+    if isinstance(dwca_path, str):
         dwca_path = Path(dwca_path)
     output_path = dwca_path.with_suffix(".parquet")
     parquet_writer = None
@@ -158,14 +161,21 @@ def preprocess_occurrences_stream(
         for row in dwca:
             img_extensions = []
             for ext in row.extensions:
-                if ext.rowtype == gbifqualname + "Multimedia" and ext.data[mmqualname + "type"] == mediatype:
+                if (
+                    ext.rowtype == gbifqualname + "Multimedia"
+                    and ext.data[mmqualname + "type"] == mediatype
+                ):
                     img_extensions.append(ext.data)
 
-            media = [random.choice(img_extensions)] if one_media_per_occurrence else img_extensions
+            media = (
+                [random.choice(img_extensions)]
+                if one_media_per_occurrence
+                else img_extensions
+            )
 
             for selected_img in media:
                 url = selected_img.get(mmqualname + "identifier")
-                
+
                 if not url:
                     continue
 
@@ -175,30 +185,36 @@ def preprocess_occurrences_stream(
                 # 2. For file naming (hex string, more suitable for filenames)
                 # url_hash = format(mmh3.hash128(url)[0], 'x')  # Using first 64 bits of 128-bit hash
                 url_hash = hashlib.sha1(url.encode("utf-8")).hexdigest()
-                
+
                 if dedup_hash in seen_urls:
                     continue
                 seen_urls.add(dedup_hash)
 
-                metadata = {k.split('/')[-1]: v for k, v in row.data.items() 
-                            if k.split('/')[-1] in KEYS_OCC + KEYS_GBIF}
-                
-                metadata.update({
-                    k.split('/')[-1]: v for k, v in selected_img.items() 
-                    if k.split('/')[-1] in KEYS_MULT
-                })
+                metadata = {
+                    k.split("/")[-1]: v
+                    for k, v in row.data.items()
+                    if k.split("/")[-1] in KEYS_OCC + KEYS_GBIF
+                }
+
+                metadata.update(
+                    {
+                        k.split("/")[-1]: v
+                        for k, v in selected_img.items()
+                        if k.split("/")[-1] in KEYS_MULT
+                    }
+                )
 
                 # Add the URL hash to metadata
-                metadata['url_hash'] = url_hash
+                metadata["url_hash"] = url_hash
 
                 # print(f"metadata; {metadata}")
 
                 if any(not metadata.get(key) for key in KEYS_GBIF):
                     continue
 
-                taxon_key = metadata.get('taxonKey')
+                taxon_key = metadata.get("taxonKey")
                 species_counts[taxon_key] += 1
-                
+
                 if species_counts[taxon_key] > max_img_per_species:
                     continue
 
@@ -207,19 +223,21 @@ def preprocess_occurrences_stream(
                     chunk_data[k].append(v)
 
                 # print(f"chunk_data; {chunk_data}")
-                
+
                 processed_rows += 1
 
                 # Write chunk when full
                 if processed_rows % chunk_size == 0:
                     chunk_table = pa.table(chunk_data)
-                    
+
                     if parquet_writer is None:
-                        parquet_writer = pq.ParquetWriter(output_path, chunk_table.schema)
-                    
+                        parquet_writer = pq.ParquetWriter(
+                            output_path, chunk_table.schema
+                        )
+
                     parquet_writer.write_table(chunk_table)
                     chunk_data = defaultdict(list)
-                    
+
                     log_memory(f"After processing {processed_rows} rows")
 
         # Write final chunk if exists
@@ -242,11 +260,13 @@ def preprocess_occurrences_stream(
 
     return output_path
 
+
 def main():
     preprocess_occurrences_stream(
         dwca_path="data/classif/lepi_small/0060185-241126133413365.zip",
         log_mem=True,
     )
 
-if __name__=="__main__":
+
+if __name__ == "__main__":
     main()
