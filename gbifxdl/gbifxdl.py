@@ -46,7 +46,7 @@ else:
     from typing_extensions import TypedDict
 from typing import Optional
 
-__all__ = ["post",
+__all__ = ["post", "poll_status",
     "config_post",
     "download_occurrences",
     "config_download_occurrences",
