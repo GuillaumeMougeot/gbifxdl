@@ -819,7 +819,7 @@ class AsyncImagePipeline:
         # Retry options
         self.max_download_attempts = max_download_attempts
         self.retry_options = retry_options or ExponentialRetry(
-            attempts=self.max_download_attemps,  # Retry up to 10 times
+            attempts=self.max_download_attempts,  # Retry up to 10 times
             statuses={429, 500, 502, 503, 504},  # Retry on server and rate-limit errors
             start_timeout=10,
         )
@@ -1060,7 +1060,6 @@ class AsyncImagePipeline:
     def process_image(self, filename: str, folder: str, thread_id=None) -> bool:
         """Crop the image, hash the image, get image size, ..."""
         try:
-            self.logger.info((self.output_dir, folder, filename))
             img_path = os.path.join(self.output_dir, folder, filename)
 
             # Crop image
