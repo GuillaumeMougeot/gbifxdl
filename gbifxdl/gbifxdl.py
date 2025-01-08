@@ -514,7 +514,16 @@ def get_memory_usage():
     process = psutil.Process(os.getpid())
     return process.memory_info().rss / (1024 * 1024)  # MB
 
-def preprocess_occurrences_stream(occurrences_path: Path, file_format='dwca', max_img_spc=None, chunk_size = 10000):
+def preprocess_occurrences_stream(
+    dwca_path: str,
+    file_format: str = "dwca",
+    max_img_spc: Optional[int] = None,
+    chunk_size: int = 10000,
+    mediatype: str = "StillImage",
+    one_media_per_occurrence: bool = True,
+    delete: Optional[bool] = False,
+    log_mem: Optional[bool] = False,
+) -> str:
     """Process DWCA to retrieve only relevant information and store it in a Parquet file.
 
     Streams through the DWCA and works with chunks for storing to avoid loading the entire file into memory.
@@ -523,14 +532,22 @@ def preprocess_occurrences_stream(occurrences_path: Path, file_format='dwca', ma
 
     Parameters
     ----------
-    occurrence_path : Path
-        Path to the occurrence file.
+    dwca_path : str
+        Path to the DWCA file.
     file_format : str, default='dwca'
-        Format of the occurrence file. File processing differs depending on the file format. Currently only supports `dwca`.
-    maz_img_spc : int, default=None
-        Maximum of multimedia file to keep per species. 
+        Format of the occurrence file. Currently supports only 'dwca'.
+    max_img_spc : int, default=None
+        Maximum number of multimedia files to keep per species.
     chunk_size : int, default=10000
         Chunk size for processing the occurrence file.
+    mediatype : str, default='StillImage'
+        Type of media to extract.
+    one_media_per_occurrence : bool, default=True
+        Whether to limit to one media file per occurrence.
+    delete : bool, default=False
+        Whether to delete the DWCA file after processing.
+    log_mem : bool, default=False
+        Whether to log memory information. For debugging.
     
     Returns
     -------
@@ -542,54 +559,65 @@ def preprocess_occurrences_stream(occurrences_path: Path, file_format='dwca', ma
     # Memory tracking setup
     memory_log = []
     def log_memory(stage):
-        current_memory = get_memory_usage()
-        memory_log.append((stage, current_memory))
-        print(f"{stage}: {current_memory:.2f} MB")
+        if log_mem:
+            current_memory = get_memory_usage()
+            memory_log.append((stage, current_memory))
+            print(f"{stage}: {current_memory:.2f} MB")
 
     log_memory("Start")
 
-    assert occurrences_path is not None, "No occurrence path provided"
+    assert dwca_path is not None, "No occurrence path provided"
     if file_format.lower() != "dwca":
         raise ValueError(f"Unknown format: {file_format.lower()}")
 
-    seen_identifiers = set()
+    seen_urls = set()
     species_counts = defaultdict(int)
     max_img_per_species = max_img_spc if max_img_spc is not None else float('inf')
-
     chunk_data = defaultdict(list)
     processed_rows = 0
 
-    output_path = occurrences_path.with_suffix(".parquet")
+    assert isinstance(dwca_path, (str, Path)), TypeError("Occurrences path must be one of str or Path.")
+    if isinstance(dwca_path, str): 
+        dwca_path = Path(dwca_path)
+    output_path = dwca_path.with_suffix(".parquet")
     parquet_writer = None
 
     log_memory("Before processing")
 
-    with DwCAReader(occurrences_path) as dwca:
+    mmqualname = "http://purl.org/dc/terms/"
+    gbifqualname = "http://rs.gbif.org/terms/1.0/"
+
+    with DwCAReader(dwca_path) as dwca:
         for row in dwca:
-            extensions = row.extensions[:-1]
-            
-            for e in extensions:
-                identifier = e.data['http://purl.org/dc/terms/identifier']
+            img_extensions = []
+            for ext in row.extensions:
+                if ext.rowtype == gbifqualname + "Multimedia" and ext.data[mmqualname + "type"] == mediatype:
+                    img_extensions.append(ext.data)
+
+            media = [random.choice(img_extensions)] if one_media_per_occurrence else img_extensions
+
+            for selected_img in media:
+                url = selected_img.get(mmqualname + "identifier")
                 
-                if not identifier:
+                if not url:
                     continue
 
                 # Create two types of hashes:
                 # 1. For deduplication (faster integer hash)
-                dedup_hash = mmh3.hash(identifier)
+                dedup_hash = mmh3.hash(url)
                 # 2. For file naming (hex string, more suitable for filenames)
-                # url_hash = format(mmh3.hash128(identifier)[0], 'x')  # Using first 64 bits of 128-bit hash
-                url_hash = hashlib.sha1(identifier.encode("utf-8")).hexdigest()
+                # url_hash = format(mmh3.hash128(url)[0], 'x')  # Using first 64 bits of 128-bit hash
+                url_hash = hashlib.sha1(url.encode("utf-8")).hexdigest()
                 
-                if dedup_hash in seen_identifiers:
+                if dedup_hash in seen_urls:
                     continue
-                seen_identifiers.add(dedup_hash)
+                seen_urls.add(dedup_hash)
 
                 metadata = {k.split('/')[-1]: v for k, v in row.data.items() 
                             if k.split('/')[-1] in KEYS_OCC + KEYS_GBIF}
                 
                 metadata.update({
-                    k.split('/')[-1]: v for k, v in e.data.items() 
+                    k.split('/')[-1]: v for k, v in selected_img.items() 
                     if k.split('/')[-1] in KEYS_MULT
                 })
 
@@ -637,13 +665,13 @@ def preprocess_occurrences_stream(occurrences_path: Path, file_format='dwca', ma
         if parquet_writer:
             parquet_writer.close()
 
+    if delete:
+        os.remove(dwca_path)
+
     log_memory("End of processing")
 
     print(f"Total processing time: {time.time() - start_time:.2f} seconds")
     print(f"Total unique rows processed: {processed_rows}")
-    print("\nMemory Usage Log:")
-    for stage, memory in memory_log:
-        print(f"{stage}: {memory:.2f} MB")
 
     return output_path
 
