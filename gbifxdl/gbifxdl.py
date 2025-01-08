@@ -995,8 +995,8 @@ class AsyncImagePipeline:
         """
         Downloads a single image and saves it to the output directory.
         """
-        async with self.download_semaphore:
-            try:
+        try:
+            async with self.download_semaphore:
                 async with session.get(url) as response:
                     response.raise_for_status()
 
@@ -1022,33 +1022,34 @@ class AsyncImagePipeline:
 
                     async with aiofiles.open(full_path, "wb") as f:
                         await f.write(await response.read())
-                    
-                    # Check if the image is corrupted
-                    # Retry download if it is the case
-                    try:
-                        with Image.open(full_path) as img:
-                            img.verify()  # Verify that it is, in fact, an image
-                    except (IOError, SyntaxError, UnidentifiedImageError, Image.DecompressionBombError) as e:
-                        if _num_attempts >= self.max_download_attempts:
-                            self.logger.error(f"Image {full_path} seems corrupted.")
-                            raise e
-                        # Retry if the images is corrupted
-                        self.logger.debug(f"An issue arose while downloading {full_path}. Reattempting...")
-                        return await self.download_image(
-                            session,
-                            url,
-                            url_hash,
-                            form,
-                            folder,
-                            _num_attempts+1
-                        )
+                
+                
+            # Check if the image is corrupted
+            # Retry download if it is the case
+            try:
+                with Image.open(full_path) as img:
+                    img.verify()  # Verify that it is, in fact, an image
+            except (IOError, SyntaxError, UnidentifiedImageError, Image.DecompressionBombError) as e:
+                if _num_attempts >= self.max_download_attempts:
+                    self.logger.error(f"Image {full_path} seems corrupted.")
+                    raise e
+                # Retry if the images is corrupted
+                self.logger.debug(f"An issue arose while downloading {full_path}. Reattempting...")
+                return await self.download_image(
+                    session,
+                    url,
+                    url_hash,
+                    form,
+                    folder,
+                    _num_attempts+1
+                )
 
-                    self.logger.debug(f"Downloaded: {url}")
-                    return filename
+            self.logger.debug(f"Downloaded: {url}")
+            return filename
 
-            except Exception as e:
-                self.logger.error(f"Error downloading {url}: {e}")
-                return None
+        except Exception as e:
+            self.logger.error(f"Error downloading {url}: {e}")
+            return None
 
     def compute_hash_and_dimensions(self, img_path):
         """Calculate hash and dimensions of an image."""
