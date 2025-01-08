@@ -274,7 +274,23 @@ def config_post(config):
 # -----------------------------------------------------------------------------
 # Download the occurence file
 
-def download_occurrences(dataset_dir, file_format, download_key):
+def download_occurrences(download_key : str, dataset_dir : str, file_format : str = 'dwca'):
+    """Given a download key, download the occurrence file into dataset directory.
+
+    Parameters
+    ----------
+    download_key : str
+        Download key obtained after the POST request. Use gbifxdl.post to obtain one.
+    dataset_dir : str
+        Path where the occurrence file will be downloaded.
+    file_format : str, default='dwca'
+        Format of the occurrence file. 'dwca' is highly recommended.
+    
+    Returns
+    -------
+    occurrence_path : Path
+        Path to the downloaded occurrence file.
+    """
     assert download_key is not None, "No download key provided, please provide one."
 
     # Download the file
@@ -309,9 +325,10 @@ def download_occurrences(dataset_dir, file_format, download_key):
 
 def config_download_occurrences(config, download_key):
     download_occurrences(
+        download_key=download_key,
         dataset_dir=config['dataset_dir'], 
         file_format=config['format'], 
-        download_key=download_key)
+        )
 
 # -----------------------------------------------------------------------------
 # Prepare the download file - remove duplicates, limit the number of download per species, remove the columns we don't need, etc.
