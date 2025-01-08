@@ -189,10 +189,10 @@ def poll_status(download_key, wait=True):
     """With a download key given by the Occurrence API, check the download status.
     Eventually wait if `wait` is True and if download status is one of `"RUNNING"`, `"PENDING"` or `"PREPARING"`.
     """
-    status_endpoint = f"https://api.gbif.org/v1/occurrence/download/{download_key}"
-    print(f"Polling status from: {status_endpoint}")
-
     def poll_once():
+        status_endpoint = f"https://api.gbif.org/v1/occurrence/download/{download_key}"
+        print(f"Polling status from: {status_endpoint}")
+
         status_response = requests.get(status_endpoint)
 
         if status_response.status_code == 200:
@@ -202,7 +202,7 @@ def poll_status(download_key, wait=True):
 
             if download_status == "SUCCEEDED":
                 print(f"Download ready! The occurence file will be downloaded with the following key: {download_key}")
-                return download_key
+                return status_endpoint
             elif download_status in ["RUNNING", "PENDING", "PREPARING"]:
                 print("Download is still processing.")
                 if wait:
@@ -233,6 +233,13 @@ def post(payload: str, pwd: str, wait: bool = True):
         Path to the JSON file containing to the GBIF predicate for the post. For more information, refer to https://techdocs.gbif.org/en/openapi/v1/occurrence#/Searching%20occurrences/searchOccurrence.
     pwd : str
         GBIF password for connection. Username should mentioned in `creator` field in the payload.
+    wait : bool, default=True
+        Whether to wait for the download to be ready or not.
+    
+    Returns
+    -------
+    str
+        Download link of the occurrence file. If any issues arise during posting then return None.
     """
     # API endpoint for occurrence downloads
     api_endpoint = "https://api.gbif.org/v1/occurrence/download/request"
@@ -252,12 +259,11 @@ def post(payload: str, pwd: str, wait: bool = True):
         print(f"Request posted successfully. GBIF is preparing the occurence file for download. Please wait. Download key: {download_key}")
 
         # Polling to check the status of the download
-        poll_status(download_key=download_key, wait=wait)
-        
+        return poll_status(download_key=download_key, wait=wait)
     else:
         print(f"Failed to post request. HTTP Status Code: {response.status_code}")
         print(f"Response: {response.text}")
-    return None
+        return None
 
 def config_post(config):
     # Check if config has a "pwd" key
