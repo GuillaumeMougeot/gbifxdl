@@ -554,6 +554,10 @@ def preprocess_occurrences_stream(
     -------
     output_path : str
         Path to the preprocessed occurrence file.
+
+    Notes
+    -----
+    Parts of this function have been adapted from https://github.com/plantnet/gbif-dl/blob/master/gbif_dl/generators/dwca.py.
     """
     start_time = time.time()
     
