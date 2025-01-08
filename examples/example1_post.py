@@ -24,6 +24,6 @@ pwd=env['GBIF_PWD']
 payload_path = addcwd("payload-EU-lepi.json")
 
 # Send a post request to GBIF
-post(payload_path, pwd=pwd, wait=False)
+download_link = post(payload_path, pwd=pwd, wait=False)
 
 # to download : https://api.gbif.org/v1/occurrence/download/0060185-241126133413365
