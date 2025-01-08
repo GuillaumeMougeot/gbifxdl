@@ -317,31 +317,33 @@ def download_occurrences(download_key : str, dataset_dir : str, file_format : st
 
     # Download the file
     download_url = f"https://api.gbif.org/v1/occurrence/download/request/{download_key}.zip"
-    print(f"Downloading the occurence file from {download_url}...")
+    print(f"Downloading the occurrence file from {download_url}...")
     download_response = requests.get(download_url)
 
     # Check response result
     if download_response.status_code != 200:
-        print(f"Failed to download the occurence file. HTTP Status Code: {download_response.status_code}")
+        print(f"Failed to download the occurrence file. HTTP Status Code: {download_response.status_code}")
         return
 
     occurrences_zip = join(dataset_dir, f"{download_key}.zip")
     with open(occurrences_zip, 'wb') as f:
         f.write(download_response.content)
-    print(f"Downloaded the occurence file to: {occurrences_zip}")
+    print(f"Downloaded the occurrence file to: {occurrences_zip}")
 
     # Unzip the file and remove the .zip if not dwca
     if file_format.lower() != "dwca":
-        print("Unzipping occurence file ")
+        print("Unzipping occurrence file ")
         with zipfile.ZipFile(occurrences_zip, 'r') as zip_file:
             occurrences_path = join(dataset_dir, f"{download_key}")
             zip_file.extractall(occurrences_path)
 
-    # For parquet format, add occurrence.parquet to the path
-    if file_format.lower() == "simple_parquet":
-        occurrences_path = join(occurrences_path, 'occurrence.parquet')
+        # For parquet format, add occurrence.parquet to the path
+        if file_format.lower() == "simple_parquet":
+            occurrences_path = join(occurrences_path, 'occurrence.parquet')
+    else:
+        occurrences_path = occurrences_zip
 
-    print(f"Occurence downloaded in {occurrences_path}.")
+    print(f"Occurrence downloaded in {occurrences_path}.")
 
     return Path(occurrences_path)
 
