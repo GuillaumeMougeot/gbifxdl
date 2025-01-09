@@ -610,6 +610,9 @@ def preprocess_occurrences_stream(
     Notes
     -----
     Parts of this function have been adapted from https://github.com/plantnet/gbif-dl/blob/master/gbif_dl/generators/dwca.py.
+
+    For future update, this function may rely on DWCAReader.pd_read + iterator instead (by using `chunksize` argument).
+    It may speed up the preprocesssing without using more RAM.
     """
     start_time = time.time()
 
