@@ -26,6 +26,7 @@ dependencies = [
   "pyarrow",
   "tqdm",
   "pillow",
+  "dask",
 ]
 authors = [
   {name="Guillaume Mougeot", email="guillaume.mougeot@laposte.net"},

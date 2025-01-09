@@ -13,6 +13,7 @@ import random
 from multiprocessing import Manager, Pool, Queue
 from tqdm import tqdm
 import sys
+import dask.dataframe as dd
 
 KEYS_MULT = [
     "type",
@@ -417,16 +418,45 @@ def stream_dwca_processor_parallel(dwca_path, output_path=None, max_img_spc=10, 
     return output_path
 
 
+def sample_per_species(parquet_file, max_img_spc: int = 500):
+    if isinstance(parquet_file, str):
+        parquet_file = Path(parquet_file)
+    df = dd.read_parquet(parquet_file)
+
+    # Function to sample 500 rows per speciesKey
+    def sample_species(group):
+        # Ensure sampling is done correctly in Pandas
+        return group.sample(n=min(len(group), max_img_spc), random_state=42)
+
+    # Group by speciesKey and sample
+    sampled_df = df.groupby("speciesKey").apply(
+        sample_species, meta=df
+    )
+
+    # Persist the result (optional, to optimize memory usage)
+    sampled_df = sampled_df.persist()
+
+    # Save the sampled rows to a new Parquet file
+    output_path = parquet_file.with_stem(parquet_file.stem + "_sampled")
+    # output_path = "sampled_species.parquet"
+    sampled_df.compute().to_parquet(output_path, index=False)
+
+    print(f"Sampled data saved to {output_path}")
+
 def main():
     # preprocess_occurrences_stream(
     #     dwca_path="data/classif/lepi_small/0060185-241126133413365.zip",
     #     log_mem=True,
     # )
 
-    stream_dwca_processor_parallel(
-        dwca_path="data/classif/lepi_small/0060185-241126133413365.zip", num_workers=32
+    # stream_dwca_processor_parallel(
+    #     dwca_path="data/classif/lepi_small/0060185-241126133413365.zip", num_workers=32
+    # )
+
+    sample_per_species(
+        parquet_file="/home/george/codes/gbifxdl/data/classif/lepi/0061420-241126133413365.parquet",
+        max_img_spc=500,
     )
-
-
+    
 if __name__ == "__main__":
     main()

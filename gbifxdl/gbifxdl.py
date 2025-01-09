@@ -26,6 +26,7 @@ from collections import defaultdict
 import mmh3
 import psutil
 import random
+import dask.dataframe as dd
 
 # for file transfer
 import asyncio
@@ -60,6 +61,7 @@ __all__ = [
     "config_preprocess_occurrences_stream",
     "AsyncSFTPParams",
     "AsyncImagePipeline",
+    "sample_per_species",
 ]
 
 # -----------------------------------------------------------------------------
@@ -759,6 +761,44 @@ def config_preprocess_occurrences_stream(
         max_img_spc=config["max_img_spc"],
         chunk_size=chunk_size,
     )
+
+def sample_per_species(parquet_path: str, max_img_spc: int = 500, random_seed: int = 42):
+    """Sample `max_img_spc` rows per species in the occurrence file,
+    if the number of images for this species is higher than `max_img_spc`.
+    The output file is named `<parquet_path>_sampled.parquet`.
+
+    Parameters
+    ----------
+    parquet_path : str
+        Path to the parquet file.
+    max_img_spc : int, default=500
+        Maximum number of images per species.
+    random_seed : int, default=42
+        Random seed for the random sampling.
+    """
+    if isinstance(parquet_path, str):
+        parquet_path = Path(parquet_path)
+    df = dd.read_parquet(parquet_path)
+
+    # Function to sample 500 rows per speciesKey
+    def sample_species(group):
+        # Ensure sampling is done correctly in Pandas
+        return group.sample(n=min(len(group), max_img_spc), random_state=random_seed)
+
+    # Group by speciesKey and sample
+    sampled_df = df.groupby("speciesKey").apply(
+        sample_species, meta=df
+    )
+
+    # Persist the result (optional, to optimize memory usage)
+    sampled_df = sampled_df.persist()
+
+    # Save the sampled rows to a new Parquet file
+    output_path = parquet_path.with_stem(parquet_path.stem + "_sampled")
+    # output_path = "sampled_species.parquet"
+    sampled_df.compute().to_parquet(output_path, index=False)
+
+    print(f"Sampled data saved to {output_path}")
 
 
 # -----------------------------------------------------------------------------

@@ -55,4 +55,4 @@ def main3():
     downloader.run()
 
 if __name__=="__main__":
-    main2()
+    main1()
