@@ -12,6 +12,7 @@ from os.path import join, dirname, realpath
 # Replace with your own download key
 # download_key = "0060185-241126133413365"
 # download_key = "0061420-241126133413365"
+dataset_dir = 'data/classif/lepi'
 
 # Load download key from 'download_key.txt'
 def addcwd(path):
@@ -29,7 +30,7 @@ status = poll_status(download_key)
 if status == 'succeeded':
     download_path = download_occurrences(
         download_key= download_key,
-        dataset_dir = 'data/classif/lepi_small',
+        dataset_dir = dataset_dir,
         file_format = 'dwca'
     )
 else:

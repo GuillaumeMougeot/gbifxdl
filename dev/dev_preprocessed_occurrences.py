@@ -10,6 +10,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from typing import Optional
 import random
+import multiprocessing as mp
 
 KEYS_MULT = [
     "type",
@@ -260,6 +261,78 @@ def preprocess_occurrences_stream(
 
     return output_path
 
+
+
+def process_chunk(chunk_rows, mediatype, label, license_info, max_img_per_species, seen_identifiers):
+    chunk_data = defaultdict(list)
+    species_counts = defaultdict(int)
+
+    for row in chunk_rows:
+        img_extensions = [
+            ext.data for ext in row.extensions
+            if ext.rowtype.endswith("Multimedia") and ext.data.get("type") == mediatype
+        ]
+        media = [img_extensions[0]] if img_extensions else []
+
+        for selected_img in media:
+            url = selected_img.get("identifier")
+            if not url:
+                continue
+
+            dedup_hash = mmh3.hash(url)
+            if dedup_hash in seen_identifiers:
+                continue
+            seen_identifiers.add(dedup_hash)
+
+            url_hash = hashlib.sha1(url.encode("utf-8")).hexdigest()
+            taxon_key = row.data.get("taxonKey")
+            species_counts[taxon_key] += 1
+            if species_counts[taxon_key] > max_img_per_species:
+                continue
+
+            metadata = {
+                "url": url,
+                "url_hash": url_hash,
+                "label": row.data.get(label, ""),
+            }
+            if license_info:
+                metadata.update({
+                    "license": selected_img.get("license"),
+                    "publisher": selected_img.get("publisher"),
+                })
+
+            for k, v in metadata.items():
+                chunk_data[k].append(v)
+    
+    return chunk_data
+
+def parallel_dwca_processor(dwca_path, max_img_spc=10, chunk_size=1000, num_workers=4, **kwargs):
+    start_time = time.time()
+    dwca_path = Path(dwca_path)
+    output_path = dwca_path.with_suffix(".parquet")
+
+    with DwCAReader(dwca_path) as dwca:
+        rows = list(dwca)
+        chunks = [rows[i:i + chunk_size] for i in range(0, len(rows), chunk_size)]
+
+    pool = mp.Pool(num_workers)
+    results = pool.starmap(
+        process_chunk,
+        [(chunk, kwargs['mediatype'], kwargs['label'], kwargs['license_info'], max_img_spc, set()) for chunk in chunks]
+    )
+    pool.close()
+    pool.join()
+
+    combined_data = defaultdict(list)
+    for chunk_data in results:
+        for key, values in chunk_data.items():
+            combined_data[key].extend(values)
+
+    table = pa.table(combined_data)
+    pq.write_table(table, output_path)
+
+    print(f"Processing completed in {time.time() - start_time:.2f} seconds")
+    return output_path
 
 def main():
     preprocess_occurrences_stream(

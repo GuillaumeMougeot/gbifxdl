@@ -364,6 +364,8 @@ def download_occurrences(download_key: str, dataset_dir: str, file_format: str =
         print(f"Failed to download the occurrence file. HTTP Status Code: {download_response.status_code}")
         return
 
+    # create dataset dir is non-existant
+    os.makedirs(dataset_dir, exist_ok=True)
     occurrences_zip = join(dataset_dir, f"{download_key}.zip")
     with open(occurrences_zip, "wb") as f:
         f.write(download_response.content)
@@ -620,8 +622,6 @@ def preprocess_occurrences_stream(
             memory_log.append((stage, current_memory))
             print(f"{stage}: {current_memory:.2f} MB")
 
-    log_memory("Start")
-
     assert dwca_path is not None, "No occurrence path provided"
     if file_format.lower() != "dwca":
         raise ValueError(f"Unknown format: {file_format.lower()}")
@@ -646,13 +646,15 @@ def preprocess_occurrences_stream(
     gbifqualname = "http://rs.gbif.org/terms/1.0/"
 
     with DwCAReader(dwca_path) as dwca:
+        print("1")
         for row in dwca:
+            print("2")
             img_extensions = []
             for ext in row.extensions:
                 if (ext.rowtype == gbifqualname + "Multimedia"
                     and ext.data[mmqualname + "type"] == mediatype):
                     img_extensions.append(ext.data)
-
+            print("3")
             media = (
                 [random.choice(img_extensions)]
                 if one_media_per_occurrence
@@ -711,6 +713,7 @@ def preprocess_occurrences_stream(
                 # print(f"chunk_data; {chunk_data}")
 
                 processed_rows += 1
+                print("processed_rows:",processed_rows)
 
                 # Write chunk when full
                 if processed_rows % chunk_size == 0:
@@ -748,10 +751,10 @@ def preprocess_occurrences_stream(
 
 
 def config_preprocess_occurrences_stream(
-    config, occurrences_path: Path, chunk_size=10000
+    config, dwca_path: Path, chunk_size=10000
 ):
     preprocess_occurrences_stream(
-        occurrences_path=occurrences_path,
+        dwca_path=dwca_path,
         file_format=config["format"],
         max_img_spc=config["max_img_spc"],
         chunk_size=chunk_size,
