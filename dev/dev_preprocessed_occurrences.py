@@ -10,7 +10,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from typing import Optional
 import random
-import multiprocessing as mp
+from multiprocessing import Manager, Pool, Queue
+from tqdm import tqdm
+import sys
 
 KEYS_MULT = [
     "type",
@@ -262,82 +264,167 @@ def preprocess_occurrences_stream(
     return output_path
 
 
+mmqualname = "http://purl.org/dc/terms/"
+gbifqualname = "http://rs.gbif.org/terms/1.0/"
 
-def process_chunk(chunk_rows, mediatype, label, license_info, max_img_per_species, seen_identifiers):
-    chunk_data = defaultdict(list)
+def process_chunk(chunk_rows, dedup_dict, mediatype, max_img_per_species, one_media_per_occurrence=True):
+    """
+    Processes a chunk of rows and returns processed data.
+    """
     species_counts = defaultdict(int)
+    chunk_data = defaultdict(list)
+    # sys.stdout.flush()
 
     for row in chunk_rows:
-        img_extensions = [
-            ext.data for ext in row.extensions
-            if ext.rowtype.endswith("Multimedia") and ext.data.get("type") == mediatype
-        ]
-        media = [img_extensions[0]] if img_extensions else []
+        # Filter multimedia extensions
+        img_extensions = []
+        for ext in row.extensions:
+            if (
+                ext.rowtype == gbifqualname + "Multimedia"
+                and ext.data[mmqualname + "type"] == mediatype
+            ):
+                img_extensions.append(ext.data)
+
+        media = (
+            [random.choice(img_extensions)]
+            if one_media_per_occurrence
+            else img_extensions
+        )
 
         for selected_img in media:
-            url = selected_img.get("identifier")
+            url = selected_img.get(mmqualname + "identifier")
+
             if not url:
                 continue
 
+            # Create two types of hashes:
+            # 1. For deduplication (faster integer hash)
             dedup_hash = mmh3.hash(url)
-            if dedup_hash in seen_identifiers:
-                continue
-            seen_identifiers.add(dedup_hash)
-
+            # 2. For file naming (hex string, more suitable for filenames)
+            # url_hash = format(mmh3.hash128(url)[0], 'x')  # Using first 64 bits of 128-bit hash
             url_hash = hashlib.sha1(url.encode("utf-8")).hexdigest()
-            taxon_key = row.data.get("taxonKey")
+
+            if dedup_hash in dedup_dict:
+                continue
+            dedup_dict.add(dedup_hash)
+            print("hey")
+
+            metadata = {
+                k.split("/")[-1]: v
+                for k, v in row.data.items()
+                if k.split("/")[-1] in KEYS_OCC + KEYS_GBIF
+            }
+
+            metadata.update(
+                {
+                    k.split("/")[-1]: v
+                    for k, v in selected_img.items()
+                    if k.split("/")[-1] in KEYS_MULT
+                }
+            )
+
+            # Add the URL hash to metadata
+            metadata["url_hash"] = url_hash
+
+            # print(f"metadata; {metadata}")
+
+            if any(not metadata.get(key) for key in KEYS_GBIF):
+                continue
+
+            taxon_key = metadata.get("taxonKey")
             species_counts[taxon_key] += 1
+
             if species_counts[taxon_key] > max_img_per_species:
                 continue
 
-            metadata = {
-                "url": url,
-                "url_hash": url_hash,
-                "label": row.data.get(label, ""),
-            }
-            if license_info:
-                metadata.update({
-                    "license": selected_img.get("license"),
-                    "publisher": selected_img.get("publisher"),
-                })
-
+            # Accumulate data in chunk
             for k, v in metadata.items():
                 chunk_data[k].append(v)
-    
+
     return chunk_data
 
-def parallel_dwca_processor(dwca_path, max_img_spc=10, chunk_size=1000, num_workers=4, **kwargs):
+
+def write_parquet_chunk(chunk_data, output_path, parquet_writer):
+    """
+    Writes a chunk of data to the Parquet file.
+    """
+    table = pa.table(chunk_data)
+    if parquet_writer is None:
+        parquet_writer = pq.ParquetWriter(output_path, table.schema)
+    parquet_writer.write_table(table)
+    return parquet_writer
+
+
+def stream_dwca_processor_parallel(dwca_path, output_path=None, max_img_spc=10, chunk_size=1000, num_workers=8, 
+                                   mediatype="StillImage",):
+    """
+    IT DOES NOT WORK!
+    Processes a large DWCA file in parallel and writes results incrementally to a Parquet file.
+    """
     start_time = time.time()
     dwca_path = Path(dwca_path)
-    output_path = dwca_path.with_suffix(".parquet")
+    if output_path is None:
+        output_path = dwca_path.with_suffix(".parquet")
 
+    # Shared deduplication dictionary
+    manager = Manager()
+    dedup_dict = manager.dict()
+
+    # Initialize Parquet writer
+    parquet_writer = None
+
+    # Read rows in a streaming manner and divide into chunks
     with DwCAReader(dwca_path) as dwca:
-        rows = list(dwca)
-        chunks = [rows[i:i + chunk_size] for i in range(0, len(rows), chunk_size)]
+        rows = []
+        chunk_id = 0
 
-    pool = mp.Pool(num_workers)
-    results = pool.starmap(
-        process_chunk,
-        [(chunk, kwargs['mediatype'], kwargs['label'], kwargs['license_info'], max_img_spc, set()) for chunk in chunks]
-    )
-    pool.close()
-    pool.join()
+        def worker_callback(result):
+            nonlocal parquet_writer
+            nonlocal chunk_id
+            parquet_writer = write_parquet_chunk(result, output_path, parquet_writer)
+            chunk_id += 1
 
-    combined_data = defaultdict(list)
-    for chunk_data in results:
-        for key, values in chunk_data.items():
-            combined_data[key].extend(values)
+        with Pool(processes=num_workers) as pool:
+            for row in dwca:
+                rows.append(row)
 
-    table = pa.table(combined_data)
-    pq.write_table(table, output_path)
+                # When a chunk is full, process it in parallel
+                if len(rows) >= chunk_size:
+                    pool.apply_async(
+                        process_chunk,
+                        args=(rows, dedup_dict, mediatype, max_img_spc),
+                        callback=worker_callback,
+                    )
+                    rows = []
+
+            # Process the final chunk
+            if rows:
+                pool.apply_async(
+                    process_chunk,
+                    args=(rows, dedup_dict, mediatype, max_img_spc),
+                    callback=worker_callback,
+                )
+                rows = []
+
+            pool.close()
+            pool.join()
+
+    if parquet_writer:
+        parquet_writer.close()
 
     print(f"Processing completed in {time.time() - start_time:.2f} seconds")
+    print(f"Results saved to {output_path}")
     return output_path
 
+
 def main():
-    preprocess_occurrences_stream(
-        dwca_path="data/classif/lepi_small/0060185-241126133413365.zip",
-        log_mem=True,
+    # preprocess_occurrences_stream(
+    #     dwca_path="data/classif/lepi_small/0060185-241126133413365.zip",
+    #     log_mem=True,
+    # )
+
+    stream_dwca_processor_parallel(
+        dwca_path="data/classif/lepi_small/0060185-241126133413365.zip", num_workers=32
     )
 
 

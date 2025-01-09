@@ -646,15 +646,13 @@ def preprocess_occurrences_stream(
     gbifqualname = "http://rs.gbif.org/terms/1.0/"
 
     with DwCAReader(dwca_path) as dwca:
-        print("1")
         for row in dwca:
-            print("2")
             img_extensions = []
             for ext in row.extensions:
                 if (ext.rowtype == gbifqualname + "Multimedia"
                     and ext.data[mmqualname + "type"] == mediatype):
                     img_extensions.append(ext.data)
-            print("3")
+
             media = (
                 [random.choice(img_extensions)]
                 if one_media_per_occurrence
@@ -713,7 +711,6 @@ def preprocess_occurrences_stream(
                 # print(f"chunk_data; {chunk_data}")
 
                 processed_rows += 1
-                print("processed_rows:",processed_rows)
 
                 # Write chunk when full
                 if processed_rows % chunk_size == 0:
