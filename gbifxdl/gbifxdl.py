@@ -813,6 +813,7 @@ VALID_IMAGE_FORMAT = (
     "image/jpg",
     "image/tiff",
     "image/tif",
+    "image/webp"
 )
 
 
