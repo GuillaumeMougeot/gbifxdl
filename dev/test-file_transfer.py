@@ -6,7 +6,7 @@ def main1():
         output_dir='/home/george/codes/gbifxdl/data/classif/mini/downloaded_images',
         url_column='identifier',
         max_concurrent_download=64,
-        verbose_level=0,
+        verbose_level=1,
         batch_size=1024,
     )
     downloader.run()

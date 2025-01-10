@@ -68,7 +68,7 @@ __all__ = [
 # Logger
 
 
-def set_logger(log_dir=Path("."), suffix=""):
+def set_logger(log_dir=Path("."), suffix="", level=logging.INFO):
     """Helper function to set up the logging process.
 
     Parameters
@@ -87,22 +87,21 @@ def set_logger(log_dir=Path("."), suffix=""):
     """
     # Create a logger
     logger = logging.getLogger(__name__)
-    logger.setLevel(logging.INFO)
+    logger.setLevel(level)
 
     # Generate the log file name
     log_name = datetime.now().strftime("%Y%m%d-%H%M%S") + suffix + ".log"
+    if isinstance(log_dir, str):
+        log_dir = Path(log_dir)
     filename = log_dir / log_name
 
     # Remove any existing handlers from the logger
     for handler in logger.handlers[:]:
         logger.removeHandler(handler)
 
-    # Prevent log propagation to the root logger
-    logger.propagate = False
-
     # Create a file handler
     file_handler = logging.FileHandler(filename, encoding="utf-8")
-    file_handler.setLevel(logging.INFO)
+    file_handler.setLevel(level)
 
     # Create a formatter and attach it to the file handler
     formatter = logging.Formatter(
@@ -113,9 +112,8 @@ def set_logger(log_dir=Path("."), suffix=""):
     # Add the file handler to the logger
     logger.addHandler(file_handler)
 
-    # Debugging: Print all handlers (can be removed later)
-    for handler in logger.handlers:
-        print(f"My logger handler: {handler}")
+    # Prevent log propagation to the root logger
+    logger.propagate = False
 
     return logger, filename
 
@@ -874,25 +872,10 @@ class AsyncImagePipeline:
         if self.verbose_level == 0:
             logging.getLogger("asyncssh").setLevel(logging.WARNING)
         if logger is None:
-            log_file = "pipeline.log"
-            self.logger = logging.getLogger(__name__)
-            self.logger.setLevel(
-                logging.DEBUG if self.verbose_level > 0 else logging.INFO
+            self.logger,_=set_logger(
+                log_dir=self.parquet_path.parent,
+                level=logging.DEBUG if self.verbose_level > 0 else logging.INFO
             )
-            if not self.logger.handlers:
-                file_handler = logging.FileHandler(log_file)
-                file_handler.setFormatter(
-                    logging.Formatter("%(asctime)s - %(levelname)s: %(message)s")
-                )
-                self.logger.addHandler(file_handler)
-                # Optional: Stream Handler to log to console
-                # stream_handler = logging.StreamHandler()
-                # stream_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s: %(message)s"))
-                # self.logger.addHandler(stream_handler)
-
-                self.logger.propagate = (
-                    False  # Prevent messages from propagating to the root logger
-                )
         else:
             self.logger = logger
 
@@ -921,7 +904,6 @@ class AsyncImagePipeline:
         # then the metadata is ready to be written in the output file
         self.mdid = 0
         self.metadata_lock = asyncio.Lock()
-        self.done_count = [0]
 
         # SFTP setup for upload
         if self.do_upload:
@@ -969,9 +951,6 @@ class AsyncImagePipeline:
             i = 0
             while i < len(self.metadata_buffer):
                 if url_hash in self.metadata_buffer[i].keys():
-                    # Only update status if metadata status was empty before
-                    if kwargs.get("done") and not self.metadata_buffer[i].get("done"):
-                        self.done_count[i] += 1
                     self.metadata_buffer[i][url_hash].update(kwargs)
                     break
                 else:
@@ -986,12 +965,13 @@ class AsyncImagePipeline:
         """Write the buffered metadata to a Parquet file."""
         # Check that we have more than one element in the metadata buffer
         # and check if all 'status' have been updated
-        if self.done_count[0] == len(self.metadata_buffer[0]):
+        done_count = sum([d["done"] for d in self.metadata_buffer[0].values()])
+        if done_count == len(self.metadata_buffer[0]):
             self.logger.debug(
-                f"Ready to write [{self.done_count}/{[len(s) for s in self.metadata_buffer]}]"
+                f"Ready to write [{done_count}/{[len(s) for s in self.metadata_buffer]}]"
             )
             try:
-                if self.done_count[0] > 0:
+                if done_count > 0:
                     metadata_list = [
                         dict({"url_hash": k}, **v)
                         for k, v in self.metadata_buffer[0].items()
@@ -1006,24 +986,27 @@ class AsyncImagePipeline:
                     # Merge the original data with new metadata
                     # Left outer join, but as we should have a perfect match
                     # between left and right, join type should not matter.
-                    marged_table = original_table.join(table, "url_hash")
+                    merged_table = original_table.join(table, "url_hash")
+
+                    # Assert that we did not lose any data
+                    if not (len(merged_table)==len(original_table)==len(table)):
+                        raise Exception(f"Merge error expected all tables to have identical lengths but found: {(len(merged_table), len(original_table), len(table))}")
 
                     if self.metadata_writer is None:
                         self.metadata_writer = pq.ParquetWriter(
-                            self.metadata_file, marged_table.schema
+                            self.metadata_file, merged_table.schema
                         )
 
-                    self.metadata_writer.write_table(marged_table)
+                    self.metadata_writer.write_table(merged_table)
 
                 # Reset buffer
                 del self.metadata_buffer[0]
-                del self.done_count[0]
                 self.mdid -= 1
             except Exception as e:
                 self.logger.error(f"Error while writing metadata: {e}")
         else:
             self.logger.debug(
-                f"Not ready yet [{self.done_count}/{[len(s) for s in self.metadata_buffer]}]"
+                f"Not ready yet [{done_count}/{[len(s) for s in self.metadata_buffer]}]"
             )
 
     async def download_image(
@@ -1137,9 +1120,9 @@ class AsyncImagePipeline:
             # Error metadata
             metadata = {
                 "filename": filename,
-                "img_hash": None,
-                "width": None,
-                "height": None,
+                "img_hash": "",
+                "width": 0,
+                "height": 0,
                 "status": "processing_failed",
                 "done": True,
             }
@@ -1189,10 +1172,10 @@ class AsyncImagePipeline:
                 # Add metadata default values
                 async with self.metadata_lock:
                     self.metadata_buffer[self.mdid][url_hash] = {
-                        "filename": None,
-                        "img_hash": None,
-                        "width": None,
-                        "height": None,
+                        "filename": "",
+                        "img_hash": "",
+                        "width": 0,
+                        "height": 0,
                         "status": "",
                         "done": False,
                     }
@@ -1205,7 +1188,6 @@ class AsyncImagePipeline:
             # Turn the metadata milestone to True
             async with self.metadata_lock:
                 self.metadata_buffer += [{}]
-                self.done_count += [0]
                 self.mdid += 1
 
             if count >= limit:
@@ -1237,13 +1219,13 @@ class AsyncImagePipeline:
             finally:
                 self.download_queue.task_done()
 
-    async def processing_consumer(self, thread_i):
+    async def processing_consumer(self, thread_id):
         while True:
             url_hash, filename, folder = await self.processing_queue.get()
             try:
                 # filename = await self.process_image(filename, processor_id=i)
                 filename, metadata = await asyncio.get_event_loop().run_in_executor(
-                    self.pool, partial(self.process_image, filename, folder, thread_i))
+                    self.pool, partial(self.process_image, filename=filename, folder=folder, thread_id=thread_id))
                 async with self.metadata_lock:
                     self._update_metadata(url_hash=url_hash, **metadata)
 
@@ -1256,6 +1238,10 @@ class AsyncImagePipeline:
                         self._update_metadata(
                             url_hash, status="processing_failed", done=True)
             finally:
+                if not self.do_upload:
+                    self.logger.debug("attempt to write metadata")
+                    async with self.metadata_lock:
+                        self._write_metadata_to_parquet()
                 self.processing_queue.task_done()
 
     async def upload_consumer(self, sftp):
