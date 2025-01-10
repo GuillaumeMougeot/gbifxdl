@@ -1233,14 +1233,19 @@ class AsyncImagePipeline:
                 async with self.metadata_lock:
                     self._update_metadata(url_hash=url_hash, **metadata)
 
-                if filename is not None and self.do_upload:
-                    # async with self.metadata_lock:
-                    #     self._update_metadata(url_hash,  status="processing_success")
+                if filename is None:
+                    async with self.metadata_lock:
+                        self._update_metadata(
+                            url_hash, status="processing_failed", done=True)
+                elif self.do_upload:
+                    async with self.metadata_lock:
+                        self._update_metadata(
+                            url_hash,  status="processing_success")
                     await self.upload_queue.put((url_hash, filename, folder))
                 else:
                     async with self.metadata_lock:
                         self._update_metadata(
-                            url_hash, status="processing_failed", done=True)
+                            url_hash, status="processing_success", done=True)
             finally:
                 if not self.do_upload:
                     async with self.metadata_lock:
