@@ -965,6 +965,18 @@ class AsyncImagePipeline:
                 f"KeyError: Wrong key {url_hash} or {kwargs} could not update metadata."
             )
 
+    def _fix_schema(self, table, field_name='url_hash', field_type=pa.large_string()):
+        """Change the field type of field in a schema given a field name.
+        Adapted from: https://stackoverflow.com/a/73770961/10759078
+        """
+        schema = table.schema
+        for num, field in enumerate(schema):
+            if field.name == field_name:
+                new_field = field.with_type(field_type) # return a copy of field with new type
+                schema = schema.remove(num) # remove old field 
+                schema = schema.insert(num, new_field) # add new field 
+        return table.cast(target_schema=schema)
+
     def _write_metadata_to_parquet(self):
         """Write the buffered metadata to a Parquet file."""
         # Check that we have more than one element in the metadata buffer
@@ -980,12 +992,21 @@ class AsyncImagePipeline:
                         dict({"url_hash": k}, **v)
                         for k, v in self.metadata_buffer[0].items()
                     ]
+
                     table = pa.Table.from_pylist(metadata_list)
 
                     # Get a batch of the original data
                     original_table = pa.Table.from_batches(
                         [next(self.parquet_iter_for_merge)]
                     )
+
+                    # As the schema is automatically determined for all field,
+                    # there could appear an unwanted mismatch between the schema of 'url_hash' in
+                    # the two tables, which must be fixed. 
+                    table = self._fix_schema(table)
+                    original_table = self._fix_schema(original_table)
+
+                    # Make sure 
 
                     # Merge the original data with new metadata
                     # Left outer join, but as we should have a perfect match
