@@ -26,7 +26,6 @@ from collections import defaultdict
 import mmh3
 import psutil
 import random
-import dask.dataframe as dd
 
 # for file transfer
 import asyncio
@@ -774,6 +773,11 @@ def sample_per_species(parquet_path: str, max_img_spc: int = 500, random_seed: i
     random_seed : int, default=42
         Random seed for the random sampling.
     """
+    try:
+        import dask.dataframe as dd
+    except ImportError:
+        print("Dask not found. Please install it with `pip install dask` to use sample_per_species function.")
+        return
     if isinstance(parquet_path, str):
         parquet_path = Path(parquet_path)
     df = dd.read_parquet(parquet_path)
@@ -1239,7 +1243,6 @@ class AsyncImagePipeline:
                             url_hash, status="processing_failed", done=True)
             finally:
                 if not self.do_upload:
-                    self.logger.debug("attempt to write metadata")
                     async with self.metadata_lock:
                         self._write_metadata_to_parquet()
                 self.processing_queue.task_done()
