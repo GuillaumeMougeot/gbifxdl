@@ -139,7 +139,7 @@ def list_duplicates_v3(parquet_path, batch_size=1000, img_hash_column="img_hash"
     print(f"Total duplicates removed: {sum(len(ids) for ids in batch_dup_id)}")
     print(f"Processing time {time()-start_time}")
 
-def remove_fails(parquet_path, batch_size=1000, status_column="status"):
+def remove_fails(parquet_path, batch_size=1000, status_column="status", suffix="_nofail"):
     """Use status column to remove failures. 
     Failures can be one of "downloading_failed", "processing_failed", "uploading_failed".
     """
@@ -149,7 +149,7 @@ def remove_fails(parquet_path, batch_size=1000, status_column="status"):
     parquet_file = pq.ParquetFile(parquet_path)
 
     writer = None
-    out_path = parquet_path.with_stem(parquet_path.stem + "_nofail")
+    out_path = parquet_path.with_stem(parquet_path.stem + suffix)
     total_fail = 0
     for batch in parquet_file.iter_batches(batch_size=batch_size):
         batch_table = pa.table(batch)
@@ -171,10 +171,11 @@ def remove_fails(parquet_path, batch_size=1000, status_column="status"):
         writer.close()
     
     print(f"Successfully deleted {total_fail} fails.")
+    return out_path
 
-def list_duplicates(parquet_path, batch_size=1000, img_hash_column="img_hash"):
+def deduplicate(parquet_path, batch_size=1000, img_hash_column="img_hash", suffix="_deduplicated", dup_suffix="_duplicates"):
     assert isinstance(parquet_path, (Path, str)), f"Error: parquet_path has a wrong type {type(parquet_path)}"
-    if isinstance(parquet_path, str): 
+    if isinstance(parquet_path, str):
         parquet_path = Path(parquet_path)
     start_time = time()
     parquet_file = pq.ParquetFile(parquet_path)
@@ -189,8 +190,8 @@ def list_duplicates(parquet_path, batch_size=1000, img_hash_column="img_hash"):
     # Second pass: Write duplicates and deduplicated table
     dup_writer = None  # File for duplicates
     dedup_writer = None  # File for deduplicated data
-    dup_path = parquet_path.with_stem(parquet_path.stem + "_duplicates")
-    dedup_path = parquet_path.with_stem(parquet_path.stem + "_deduplicated")
+    dup_path = parquet_path.with_stem(parquet_path.stem + dup_suffix)
+    dedup_path = parquet_path.with_stem(parquet_path.stem + suffix)
     total_duplicates = 0
 
     for batch_record in parquet_file.iter_batches(batch_size=batch_size):
@@ -224,8 +225,9 @@ def list_duplicates(parquet_path, batch_size=1000, img_hash_column="img_hash"):
 
     print(f"Total duplicates removed: {total_duplicates}")
     print(f"Processing time {time()-start_time}")
+    return dedup_path
 
-def check_integrity_and_sync(parquet_path, root_dir, batch_size=1000, filename_column="filename", dry_run=False):
+def check_integrity_and_sync(parquet_path, img_dir, batch_size=1000, filename_column="filename", dry_run=False, suffix="_cleaned", out_path=None):
     """From a Parquet file and a folder of images. Check if there is a perfect match between them.
     Remove Parquet rows or files if no match is found between the two, meaning that, if a file is not listed in the Parquet file, then the file should be removed or if a filename does not correspond to an existing file, then it should be removed from the Parquet file.
     """
@@ -242,7 +244,7 @@ def check_integrity_and_sync(parquet_path, root_dir, batch_size=1000, filename_c
     
     # List of filenames from folders
     filenames_dict = dict()
-    for r, _, files in os.walk(root_dir):
+    for r, _, files in os.walk(img_dir):
         for f in files:
             filenames_dict[f] = os.path.basename(r)  
     filenames_set = set(filenames_dict.keys())
@@ -256,7 +258,8 @@ def check_integrity_and_sync(parquet_path, root_dir, batch_size=1000, filename_c
 
     # Remove extra local files
     for f in extra_files:
-        to_remove = os.path.join(filenames_dict[f], f)
+        to_remove = os.path.join(img_dir, filenames_dict[f], f)
+        assert os.path.isfile(to_remove), f"Error: file {to_remove} not found."
         if dry_run:
             print("Will be removed:", to_remove)
         else:
@@ -267,7 +270,8 @@ def check_integrity_and_sync(parquet_path, root_dir, batch_size=1000, filename_c
     
     # Remove parquet extra files/rows
     writer = None
-    out_path = parquet_path.with_stem(parquet_path.stem + "_cleaned")
+    if out_path is None:
+        out_path = parquet_path.with_stem(parquet_path.stem + suffix)
     for batch in parquet_file.iter_batches(batch_size=batch_size):
         batch_table = pa.table(batch)
         if writer is None:
@@ -288,31 +292,62 @@ def check_integrity_and_sync(parquet_path, root_dir, batch_size=1000, filename_c
     
     if writer:
         writer.close()
+    return out_path
+
+def postprocessing(
+    parquet_path,
+    img_dir,
+    batch_size=1000,
+    status_column="status",
+    img_hash_column="img_hash",
+    filename_column="filename",
+    dry_run=False,
+    remove_itermediate=True,
+    suffix="_postprocessed",
+    ):
+    print("Start postprocessing.")
+    assert isinstance(parquet_path, (Path, str)), f"Error: parquet_path has a wrong type {type(parquet_path)}"
+    if isinstance(parquet_path, str): 
+        parquet_path = Path(parquet_path)
+
+    print("Start removing files maked as failed.")
+    nofail_path=remove_fails(
+        parquet_path=parquet_path,
+        batch_size=batch_size,
+        status_column=status_column,
+    )
+    print(f"Successfully removed fails. New Parquet file is in {nofail_path}.")
+    print("Start deduplications using image hashing.")
+    dedup_path=deduplicate(
+        parquet_path=nofail_path,
+        batch_size=batch_size,
+        img_hash_column=img_hash_column,
+    )
+    print(f"Deduplication done. Deduplicated Parquet is in {dedup_path}.")
+    if remove_itermediate: os.remove(nofail_path)
+    print("Start checking integrity and syncronizing local files with Parquet file.")
+    postprocessed_path=check_integrity_and_sync(
+        parquet_path=dedup_path,
+        img_dir=img_dir,
+        batch_size=batch_size,
+        filename_column=filename_column,
+        dry_run=dry_run,
+        out_path=parquet_path.with_stem(parquet_path.stem + suffix),
+    )
+    print(f"Files integrity established. Final postprocessed Parquet file is in {postprocessed_path}")
+    if remove_itermediate: os.remove(dedup_path)
+    print("Done postprocessing.")
 
 
 if __name__=='__main__':
 
-    remove_fails(
-        parquet_path="/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546_processing_metadata.parquet",
-        batch_size=1000,
-    )
+    # out_path=remove_fails(
+    #     parquet_path="/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546_processing_metadata.parquet",
+    # )
+    # print(out_path)
 
-    # dup=list_duplicates_v1(
-    #     parquet_path="/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546_processing_metadata.parquet",
-    # )
-    # print(len(dup))
-
-    # list_duplicates_v2(
-    #     parquet_path="/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546_processing_metadata.parquet",
-    #     batch_size=1000
-    # )
-    # list_duplicates_v3(
-    #     parquet_path="/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546_processing_metadata.parquet",
-    #     batch_size=1000
-    # )
-    # list_duplicates(
-    #     parquet_path="/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546_processing_metadata.parquet",
-    #     batch_size=1000
+    # deduplicate(
+    #     parquet_path="/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546_processing_metadata_postprocessed.parquet",
     # )
     
 
@@ -323,3 +358,8 @@ if __name__=='__main__':
     #     batch_size=1000,
     #     dry_run=True,
     # )
+
+    postprocessing(
+        parquet_path="/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546_processing_metadata.parquet",
+        img_dir="/home/george/codes/gbifxdl/data/classif/mini/downloaded_images",
+    )
