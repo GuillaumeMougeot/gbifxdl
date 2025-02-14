@@ -9,6 +9,13 @@ def download_process_images():
         verbose_level=0,
         batch_size=1024,
         max_concurrent_processing=32,
+        sftp_params=AsyncSFTPParams(
+            host="io.erda.au.dk",
+            port=2222,
+            username="gmo@ecos.au.dk",
+            client_keys=["~/.ssh/id_rsa"]),
+        remote_dir="datasets/test9",
+        max_concurrent_upload=16,
     )
     downloader.run()
 

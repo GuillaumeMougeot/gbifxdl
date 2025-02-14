@@ -6,7 +6,15 @@ from time import time
 import numpy as np
 from collections import defaultdict
 import os
-
+import asyncio
+import asyncssh
+from typing import Optional, Dict
+from sys import version_info
+from tqdm.asyncio import tqdm
+if version_info >= (3, 8):
+    from typing import TypedDict  # pylint: disable=no-name-in-module
+else:
+    from typing_extensions import TypedDict
 # local postprocessing
 
 def list_duplicates_v1(parquet_path):
@@ -333,7 +341,209 @@ def remove_fails_and_duplicates(
     
     return output_path
 
-def check_integrity_and_sync(
+def local_remove_extra_files(img_dir, parquet_filenames, dry_run=False):
+    # List files to remove
+    filenames_dict = dict()
+    for r, _, files in os.walk(img_dir):
+        for f in files:
+            filenames_dict[f] = os.path.basename(r)  
+    filenames_set = set(filenames_dict.keys())
+
+    # Compare the two sets to find extra
+    extra_files = filenames_set - parquet_filenames
+    missing_files = parquet_filenames - filenames_set
+
+    print(f"Files found in folders but not in Parquet file: {len(extra_files)}")
+    print(f"Files found in Parquet file but not in folders: {len(missing_files)}")
+
+    # Remove extra files
+    for f in extra_files:
+        to_remove = os.path.join(img_dir, filenames_dict[f], f)
+        assert os.path.isfile(to_remove), f"Error: file {to_remove} not found."
+        if dry_run:
+            print("Will be removed:", to_remove)
+        else:
+            try:
+                os.remove(to_remove)
+            except FileNotFoundError:
+                print(f"File to remove not found {to_remove}")
+    return missing_files
+
+class AsyncSFTPParams(TypedDict):
+    host: str
+    port: int
+    username: str
+    client_keys: list[str]
+
+async def remote_remove_extra_files_v1(
+    sftp_params: AsyncSFTPParams,
+    img_dir: str,
+    parquet_filenames,
+    dry_run: bool = False):
+    async with asyncssh.connect(**sftp_params) as conn:
+        async with conn.start_sftp_client() as sftp:
+            filenames_dict = {}
+            
+            async def list_files_recursive(directory):
+                files = {}
+                try:
+                    async for entry in sftp.scandir(directory):
+                        if entry.filename.startswith("."):
+                            continue  # Skip hidden files
+                        full_path = f"{directory}/{entry.filename}"
+                        if entry.attrs.is_dir():
+                            sub_files = await list_files_recursive(full_path)
+                            files.update(sub_files)
+                        else:
+                            files[entry.filename] = directory
+                except Exception as e:
+                    print(f"Error listing directory {directory}: {e}")
+                return files
+            
+            filenames_dict = await list_files_recursive(img_dir)
+            filenames_set = set(filenames_dict.keys())
+            
+            # Compare the two sets to find extra/missing files
+            extra_files = filenames_set - parquet_filenames
+            missing_files = parquet_filenames - filenames_set
+            
+            print(f"Files found on SFTP server but not in Parquet file: {len(extra_files)}")
+            print(f"Files found in Parquet file but not on SFTP server: {len(missing_files)}")
+            
+            # Remove extra files
+            for f in extra_files:
+                to_remove = f"{filenames_dict[f]}/{f}"
+                if dry_run:
+                    print("Will be removed:", to_remove)
+                else:
+                    try:
+                        await sftp.remove(to_remove)
+                        print(f"Removed: {to_remove}")
+                    except Exception as e:
+                        print(f"Error removing {to_remove}: {e}")
+            
+    return missing_files
+
+async def remote_remove_extra_files_v2(
+        sftp_params: AsyncSFTPParams,
+        img_dir: str,
+        parquet_filenames,
+        dry_run=False):
+    async with asyncssh.connect(**sftp_params) as conn:
+        async with conn.start_sftp_client() as sftp:
+            filenames_dict = {}
+
+            # List subdirectories in img_dir
+            try:
+                subdirs = await sftp.listdir(img_dir)
+                for subdir in subdirs:
+                    subdir_path = f"{img_dir}/{subdir}"
+                    try:
+                        files = await sftp.listdir(subdir_path)
+                        for f in files:
+                            filenames_dict[f] = subdir
+                    except (OSError, asyncssh.SFTPError):
+                        print(f"Warning: Failed to list files in {subdir_path}")
+            except (OSError, asyncssh.SFTPError):
+                print(f"Error: Unable to list directory {img_dir}")
+                return set()
+
+            filenames_set = set(filenames_dict.keys())
+
+            # Compare to find extra and missing files
+            extra_files = filenames_set - parquet_filenames
+            missing_files = parquet_filenames - filenames_set
+
+            print(f"Files found in folders but not in Parquet file: {len(extra_files)}")
+            print(f"Files found in Parquet file but not in folders: {len(missing_files)}")
+
+            # Remove extra files
+            for f in extra_files:
+                to_remove = f"{img_dir}/{filenames_dict[f]}/{f}"
+                if dry_run:
+                    print("Will be removed:", to_remove)
+                else:
+                    try:
+                        await sftp.remove(to_remove)
+                        print(f"Removed: {to_remove}")
+                    except asyncssh.SFTPError:
+                        print(f"Error: Failed to remove {to_remove}")
+
+            return missing_files
+
+
+async def remote_remove_extra_files(
+    sftp_params: AsyncSFTPParams,
+    img_dir: str,
+    parquet_filenames,
+    dry_run=False):
+    async with asyncssh.connect(**sftp_params) as conn:
+        async with conn.start_sftp_client() as sftp:
+            filenames_dict = {}
+
+            # List subdirectories in img_dir
+            try:
+                subdirs = await sftp.listdir(img_dir)
+                tasks = []
+
+                async def list_files(subdir):
+                    """Fetch file list for a given subdir"""
+                    subdir_path = f"{img_dir}/{subdir}"
+                    try:
+                        files = await sftp.listdir(subdir_path)
+                        return {f: subdir for f in files}
+                    except (OSError, asyncssh.SFTPError):
+                        print(f"Warning: Failed to list files in {subdir_path}")
+                        return {}
+
+                # Run directory listing in parallel with tqdm
+                for subdir in subdirs:
+                    tasks.append(list_files(subdir))
+                
+                results = await tqdm.gather(*tasks, desc="Scanning remote directories", unit="folder")
+
+                # Merge results into filenames_dict
+                for result in results:
+                    filenames_dict.update(result)
+
+            except (OSError, asyncssh.SFTPError):
+                print(f"Error: Unable to list directory {img_dir}")
+                return set()
+
+            filenames_set = set(filenames_dict.keys())
+
+            # Compare to find extra and missing files
+            extra_files = filenames_set - parquet_filenames
+            missing_files = parquet_filenames - filenames_set
+
+            print(f"Files found in folders but not in Parquet file: {len(extra_files)}")
+            print(f"Files found in Parquet file but not in folders: {len(missing_files)}")
+
+            # Remove extra files in parallel
+            if not dry_run and extra_files:
+                delete_tasks = []
+
+                async def remove_file(f):
+                    """Remove a single file asynchronously"""
+                    to_remove = f"{img_dir}/{filenames_dict[f]}/{f}"
+                    try:
+                        await sftp.remove(to_remove)
+                        return f"Removed: {to_remove}"
+                    except asyncssh.SFTPError:
+                        return f"Error: Failed to remove {to_remove}"
+
+                # Run removals in parallel with tqdm
+                for f in extra_files:
+                    delete_tasks.append(remove_file(f))
+
+                delete_results = await tqdm.gather(*delete_tasks, desc="Deleting files", unit="file")
+                for result in delete_results:
+                    print(result)
+
+            return missing_files
+
+
+def check_integrity_and_sync_v1(
     parquet_path,
     img_dir,
     batch_size=1000,
@@ -356,30 +566,12 @@ def check_integrity_and_sync(
             parquet_filenames.add(s)
     
     # List of filenames from folders
-    filenames_dict = dict()
-    for r, _, files in os.walk(img_dir):
-        for f in files:
-            filenames_dict[f] = os.path.basename(r)  
-    filenames_set = set(filenames_dict.keys())
-
-    # Compare the two sets to find extra
-    extra_files = filenames_set - parquet_filenames
-    missing_files = parquet_filenames - filenames_set
-
-    print(f"Files found in folders but not in Parquet file: {len(extra_files)}")
-    print(f"Files found in Parquet file but not in folders: {len(missing_files)}")
-
     # Remove extra local files
-    for f in extra_files:
-        to_remove = os.path.join(img_dir, filenames_dict[f], f)
-        assert os.path.isfile(to_remove), f"Error: file {to_remove} not found."
-        if dry_run:
-            print("Will be removed:", to_remove)
-        else:
-            try:
-                os.remove(to_remove)
-            except FileNotFoundError:
-                print(f"File to remove not found {to_remove}")
+    missing_files=local_remove_extra_files(
+        img_dir=img_dir,
+        parquet_filenames=parquet_filenames,
+        dry_run=dry_run
+    )
     
     # Remove parquet extra files/rows
     writer = None
@@ -407,6 +599,84 @@ def check_integrity_and_sync(
 
     print(f"Total number of rows removed from Parquet after synchronization: {total_del}")
     return out_path
+
+def check_integrity_and_sync(
+    parquet_path,
+    img_dir,
+    batch_size=1000,
+    filename_column="filename",
+    dry_run=False,
+    suffix="_cleaned",
+    out_path=None,
+    sftp_params: Optional[Dict] = None):
+    """From a Parquet file and a folder of images. Check if there is a perfect match between them.
+    Remove Parquet rows or files if no match is found between the two, meaning that, if a file is not listed in the Parquet file, then the file should be removed or if a filename does not correspond to an existing file, then it should be removed from the Parquet file.
+    """
+    assert isinstance(parquet_path, (Path, str)), f"Error: parquet_path has a wrong type {type(parquet_path)}"
+    if isinstance(parquet_path, str): 
+        parquet_path = Path(parquet_path)
+    parquet_file = pq.ParquetFile(parquet_path)
+
+    # List of files in a parquet file.
+    parquet_filenames = set()
+    for batch in parquet_file.iter_batches(batch_size=batch_size):
+        for s in batch[filename_column].to_pylist():
+            parquet_filenames.add(s)
+    
+    # Remove extra files (local or remote)
+    if sftp_params:
+        missing_files = asyncio.run(remote_remove_extra_files(
+            sftp_params=sftp_params,
+            img_dir=img_dir,
+            parquet_filenames=parquet_filenames,
+            dry_run=dry_run
+        ))
+    else:
+        missing_files = local_remove_extra_files(
+            img_dir=img_dir,
+            parquet_filenames=parquet_filenames,
+            dry_run=dry_run
+        )
+    
+    # Remove parquet extra files/rows
+    writer = None
+    total_del = 0
+    if out_path is None:
+        out_path = parquet_path.with_stem(parquet_path.stem + suffix)
+    for batch in parquet_file.iter_batches(batch_size=batch_size):
+        batch_table = pa.table(batch)
+        if writer is None:
+            writer = pq.ParquetWriter(out_path, batch_table.schema)
+        mask = np.zeros(len(batch), dtype=bool)
+        for i, s in enumerate(batch[filename_column].to_pylist()):
+            if s in missing_files:
+                mask[i] = True
+
+        # Remove unwanted elements
+        if mask.sum() > 0:
+            total_del += mask.sum()
+            batch_table = batch_table.filter(~mask)
+            
+        writer.write_table(batch_table)
+    
+    if writer:
+        writer.close()
+
+    print(f"Total number of rows removed from Parquet after synchronization: {total_del}")
+    return out_path
+
+def remove_empty_folders(img_dir, dry_run=False):
+    # Iterate through all the subdirectories and files recursively
+    for foldername, subfolders, filenames in os.walk(img_dir, topdown=False):
+        # Check if the folder is empty (no files and no subfolders)
+        if not subfolders and not filenames:
+            if dry_run:
+                print(f"Will remove folder: {foldername}")
+            else:
+                try:
+                    os.rmdir(foldername)  # Remove the empty folder
+                except OSError as e:
+                    print(f"Error removing {foldername}: {e}")
 
 def postprocessing_v1(
     parquet_path,
@@ -462,6 +732,7 @@ def postprocessing(
     dry_run=False,
     remove_itermediate=True,
     suffix="_postprocessed",
+    sftp_params=None,
     ):
     print("Start postprocessing.")
     assert isinstance(parquet_path, (Path, str)), f"Error: parquet_path has a wrong type {type(parquet_path)}"
@@ -483,9 +754,14 @@ def postprocessing(
         filename_column=filename_column,
         dry_run=dry_run,
         out_path=parquet_path.with_stem(parquet_path.stem + suffix),
+        sftp_params=sftp_params,
     )
     print(f"Files integrity established. Final postprocessed Parquet file is in {postprocessed_path}")
     if remove_itermediate: os.remove(out_path)
+    remove_empty_folders(
+        img_dir=img_dir,
+        dry_run=dry_run,
+    )
     print("Done postprocessing.")
 
 if __name__=='__main__':
@@ -510,7 +786,13 @@ if __name__=='__main__':
 
     postprocessing(
         parquet_path="/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546_processing_metadata.parquet",
-        img_dir="/home/george/codes/gbifxdl/data/classif/mini/images",
+        # img_dir="/home/george/codes/gbifxdl/data/classif/mini/images",
+        img_dir="datasets/test7",
+        sftp_params=AsyncSFTPParams(
+            host="io.erda.au.dk",
+            port=2222,
+            username="gmo@ecos.au.dk",
+            client_keys=["~/.ssh/id_rsa"]),
     )
 
     # postprocessing_v1(
@@ -523,3 +805,5 @@ if __name__=='__main__':
     #     parquet_path="/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546_processing_metadata_duplicates.parquet",
     #     columns=["speciesKey", "filename"]
     # )
+
+    # remove_empty_folders(img_dir="/home/george/codes/gbifxdl/data/classif/mini/images", dry_run=True)
