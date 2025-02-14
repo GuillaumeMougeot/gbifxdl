@@ -3,12 +3,18 @@ import sys
 import shutil
 import cv2
 import argparse
+import numpy as np
 
 def main():
+    # Usage: python image_sorter.py /path/to/input_folder /path/to/output_folder 3
+    # python dev\img_sorter.py "C:\Users\au761367\OneDrive - Aarhus universitet\Datasets\detection\cormorant\austria\Fotos Kormoran\Cormorant" data\classif\cormorants 2
+
     parser = argparse.ArgumentParser(description='Manually sort images into categories.')
     parser.add_argument('input_folder', help='Path to folder with images')
     parser.add_argument('output_folder', help='Path to output folder (will create one subfolder per class)')
     parser.add_argument('num_classes', type=int, help='Number of classes (must be between 2 and 9)')
+    parser.add_argument("-k", "--keep_original", default=False,  action='store_true', dest='keep_original',
+        help="Whether to keep the original images in the input folder. Careful if doing this and the annotation is interrupted, the current tool does not allow to restart the annotation where it has been stopped.") 
     args = parser.parse_args()
 
     if not (2 <= args.num_classes <= 9):
@@ -33,9 +39,14 @@ def main():
         sys.exit(1)
 
     print(f"Loaded {len(images)} images.")
-    print(f"Press keys [1-{args.num_classes}] to sort images, or 'q' to quit.")
+    print(f"Press keys [1-{args.num_classes}] to sort images, 'c' to cancel, or 'q' to quit.")
 
-    for image_path in images:
+    sorted_images = []
+
+    id = 0
+    while id < len(images):
+        image_path = images[id]
+        image_name = os.path.basename(image_path)
         img = cv2.imread(image_path)
         if img is None:
             print(f"Could not load image: {image_path}. Skipping.")
@@ -50,17 +61,30 @@ def main():
             print("Quitting.")
             break
 
+        elif key == ord('c') and id > 0:
+            image_path, dest_path = sorted_images.pop()
+            print(f"Cancelling last sorting: {dest_path} is moved back to {image_path}.")
+            id -= 1
+            shutil.move(dest_path, image_path)
+
         # Check if the pressed key is one of the allowed class keys.
-        if ord('1') <= key <= ord(str(args.num_classes)):
+        elif ord('1') <= key <= ord(str(args.num_classes)):
             class_key = chr(key)
-            dest_dir = os.path.join(args.output_folder, class_key)
+            # dest_dir = os.path.join(args.output_folder, class_key)
+            dest_path = os.path.join(args.output_folder, class_key, image_name)
             try:
-                shutil.move(image_path, dest_dir)
-                print(f"Moved '{os.path.basename(image_path)}' to folder '{dest_dir}'.")
+                if args.keep_original:
+                    shutil.copyfile(image_path, dest_path)
+                    print(f"Copied '{os.path.basename(image_path)}' to folder '{image_path}'.")
+                else:
+                    shutil.move(image_path, dest_path)
+                    print(f"Moved '{os.path.basename(image_path)}' to folder '{dest_path}'.")
+                sorted_images.append((image_path, dest_path))
+                id += 1
             except Exception as e:
                 print(f"Error moving file {image_path}: {e}")
         else:
-            print("Invalid key pressed. Skipping image.")
+            print("Invalid key pressed.")
 
     cv2.destroyAllWindows()
 
