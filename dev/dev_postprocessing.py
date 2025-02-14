@@ -139,6 +139,16 @@ def list_duplicates_v3(parquet_path, batch_size=1000, img_hash_column="img_hash"
     print(f"Total duplicates removed: {sum(len(ids) for ids in batch_dup_id)}")
     print(f"Processing time {time()-start_time}")
 
+def display_parquet(parquet_path, batch_size=1000, columns=[]):
+    assert isinstance(parquet_path, (Path, str)), f"Error: parquet_path has a wrong type {type(parquet_path)}"
+    if isinstance(parquet_path, str): 
+        parquet_path = Path(parquet_path)
+    parquet_file = pq.ParquetFile(parquet_path)
+    for batch in parquet_file.iter_batches(batch_size=batch_size):
+        for col in columns:
+            for b in batch[col]:
+                print(b)
+
 def remove_fails(
     parquet_path,
     batch_size=1000,
@@ -265,6 +275,10 @@ def remove_fails_and_duplicates(
     dup_path = parquet_path.with_stem(parquet_path.stem + dup_suffix) if deduplicate else None
     
     # First pass: Count occurrences of each hash if deduplication is enabled
+    # TODO: currently, if a duplicate is found in the occurrences then all 
+    # duplicated occurrences will be removed. But this is an issue when duplicates 
+    # belong to the same species, meaning that the same insect is represented. 
+    # In this case, the duplicates should not be removed.
     hash_count = defaultdict(int) if deduplicate else None
     if deduplicate:
         for batch in parquet_file.iter_batches(batch_size=batch_size):
@@ -288,11 +302,11 @@ def remove_fails_and_duplicates(
 
             if num_fails > 0:
                 batch_table = batch_table.filter(~fail_mask)
-                total_fail += (~fail_mask).sum()
+                total_fail += fail_mask.sum()
 
         # Deduplicate
         if deduplicate:
-            dup_mask = np.array([hash_count[h] > 1 for h in batch[img_hash_column]])
+            dup_mask = np.array([hash_count[h] > 1 for h in batch_table[img_hash_column]])
             total_duplicates += dup_mask.sum()
             
             if dup_mask.sum() > 0:
@@ -369,6 +383,7 @@ def check_integrity_and_sync(
     
     # Remove parquet extra files/rows
     writer = None
+    total_del = 0
     if out_path is None:
         out_path = parquet_path.with_stem(parquet_path.stem + suffix)
     for batch in parquet_file.iter_batches(batch_size=batch_size):
@@ -382,18 +397,18 @@ def check_integrity_and_sync(
 
         # Remove unwanted elements
         if mask.sum() > 0:
-            print(f"to remove {len(batch_table.filter(mask))}")
-            print(f"to remove {batch[filename_column].to_numpy(zero_copy_only=False)[mask]}")
+            total_del += mask.sum()
             batch_table = batch_table.filter(~mask)
             
-
         writer.write_table(batch_table)
     
     if writer:
         writer.close()
+
+    print(f"Total number of rows removed from Parquet after synchronization: {total_del}")
     return out_path
 
-def postprocessing(
+def postprocessing_v1(
     parquet_path,
     img_dir,
     batch_size=1000,
@@ -408,9 +423,6 @@ def postprocessing(
     assert isinstance(parquet_path, (Path, str)), f"Error: parquet_path has a wrong type {type(parquet_path)}"
     if isinstance(parquet_path, str): 
         parquet_path = Path(parquet_path)
-
-    
-
     print("Start removing files maked as failed.")
     nofail_path=remove_fails(
         parquet_path=parquet_path,
@@ -440,6 +452,42 @@ def postprocessing(
     print("Done postprocessing.")
 
 
+def postprocessing(
+    parquet_path,
+    img_dir,
+    batch_size=1000,
+    status_column="status",
+    img_hash_column="img_hash",
+    filename_column="filename",
+    dry_run=False,
+    remove_itermediate=True,
+    suffix="_postprocessed",
+    ):
+    print("Start postprocessing.")
+    assert isinstance(parquet_path, (Path, str)), f"Error: parquet_path has a wrong type {type(parquet_path)}"
+    if isinstance(parquet_path, str): 
+        parquet_path = Path(parquet_path)
+    print("Start removing files maked as failed and duplicates using image hashing.")
+    out_path=remove_fails_and_duplicates(
+        parquet_path=parquet_path,
+        batch_size=batch_size,
+        status_column=status_column,
+        img_hash_column=img_hash_column,
+    )
+    print(f"Successfully removed fails and duplicates. New Parquet file is in {out_path}.")
+    print("Start checking integrity and syncronizing local files with Parquet file.")
+    postprocessed_path=check_integrity_and_sync(
+        parquet_path=out_path,
+        img_dir=img_dir,
+        batch_size=batch_size,
+        filename_column=filename_column,
+        dry_run=dry_run,
+        out_path=parquet_path.with_stem(parquet_path.stem + suffix),
+    )
+    print(f"Files integrity established. Final postprocessed Parquet file is in {postprocessed_path}")
+    if remove_itermediate: os.remove(out_path)
+    print("Done postprocessing.")
+
 if __name__=='__main__':
 
     # out_path=remove_fails(
@@ -462,5 +510,16 @@ if __name__=='__main__':
 
     postprocessing(
         parquet_path="/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546_processing_metadata.parquet",
-        img_dir="/home/george/codes/gbifxdl/data/classif/mini/downloaded_images",
+        img_dir="/home/george/codes/gbifxdl/data/classif/mini/images",
     )
+
+    # postprocessing_v1(
+    #     parquet_path="/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546_processing_metadata.parquet",
+    #     img_dir="/home/george/codes/gbifxdl/data/classif/mini/images",
+    #     dry_run=True,
+    # )
+
+    # display_parquet(
+    #     parquet_path="/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546_processing_metadata_duplicates.parquet",
+    #     columns=["speciesKey", "filename"]
+    # )
