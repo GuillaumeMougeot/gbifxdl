@@ -139,7 +139,11 @@ def list_duplicates_v3(parquet_path, batch_size=1000, img_hash_column="img_hash"
     print(f"Total duplicates removed: {sum(len(ids) for ids in batch_dup_id)}")
     print(f"Processing time {time()-start_time}")
 
-def remove_fails(parquet_path, batch_size=1000, status_column="status", suffix="_nofail"):
+def remove_fails(
+    parquet_path,
+    batch_size=1000,
+    status_column="status",
+    suffix="_nofail"):
     """Use status column to remove failures. 
     Failures can be one of "downloading_failed", "processing_failed", "uploading_failed".
     """
@@ -173,7 +177,12 @@ def remove_fails(parquet_path, batch_size=1000, status_column="status", suffix="
     print(f"Successfully deleted {total_fail} fails.")
     return out_path
 
-def deduplicate(parquet_path, batch_size=1000, img_hash_column="img_hash", suffix="_deduplicated", dup_suffix="_duplicates"):
+def deduplicate(
+    parquet_path,
+    batch_size=1000,
+    img_hash_column="img_hash",
+    suffix="_deduplicated",
+    dup_suffix="_duplicates"):
     assert isinstance(parquet_path, (Path, str)), f"Error: parquet_path has a wrong type {type(parquet_path)}"
     if isinstance(parquet_path, str):
         parquet_path = Path(parquet_path)
@@ -227,7 +236,97 @@ def deduplicate(parquet_path, batch_size=1000, img_hash_column="img_hash", suffi
     print(f"Processing time {time()-start_time}")
     return dedup_path
 
-def check_integrity_and_sync(parquet_path, img_dir, batch_size=1000, filename_column="filename", dry_run=False, suffix="_cleaned", out_path=None):
+def remove_fails_and_duplicates(
+    parquet_path,
+    batch_size=1000,
+    status_column="status",
+    img_hash_column="img_hash",
+    remove_fails=True,
+    deduplicate=True,
+    fail_suffix="_nofail",
+    dedup_suffix="_deduplicated",
+    dup_suffix="_duplicates",
+):
+    """Processes a Parquet file by removing failures and/or deduplicating entries."""
+    assert isinstance(parquet_path, (Path, str)), f"Error: parquet_path has a wrong type {type(parquet_path)}"
+    if isinstance(parquet_path, str):
+        parquet_path = Path(parquet_path)
+    
+    start_time = time()
+    parquet_file = pq.ParquetFile(parquet_path)
+    
+    # Initialize output paths
+    output_path = parquet_path
+    if remove_fails:
+        output_path = output_path.with_stem(output_path.stem + fail_suffix)
+    if deduplicate:
+        output_path = output_path.with_stem(output_path.stem + dedup_suffix)
+    
+    dup_path = parquet_path.with_stem(parquet_path.stem + dup_suffix) if deduplicate else None
+    
+    # First pass: Count occurrences of each hash if deduplication is enabled
+    hash_count = defaultdict(int) if deduplicate else None
+    if deduplicate:
+        for batch in parquet_file.iter_batches(batch_size=batch_size):
+            for h in batch[img_hash_column]:
+                hash_count[h] += 1
+    
+    # Second pass: Process the data
+    writer = None
+    dup_writer = None if deduplicate else None
+    total_fail = 0
+    total_duplicates = 0
+    
+    for batch in parquet_file.iter_batches(batch_size=batch_size):
+        batch_table = pa.table(batch)
+        mask = np.ones(len(batch), dtype=bool)
+        
+        # Remove failures
+        if remove_fails:
+            fail_mask = np.array([status.split("_")[1] == "failed" for status in batch[status_column].to_pylist()])
+            num_fails = fail_mask.sum()
+
+            if num_fails > 0:
+                batch_table = batch_table.filter(~fail_mask)
+                total_fail += (~fail_mask).sum()
+
+        # Deduplicate
+        if deduplicate:
+            dup_mask = np.array([hash_count[h] > 1 for h in batch[img_hash_column]])
+            total_duplicates += dup_mask.sum()
+            
+            if dup_mask.sum() > 0:
+                batch_dup = batch_table.filter(dup_mask)
+                batch_table = batch_table.filter(~dup_mask)
+                
+                if dup_writer is None:
+                    dup_writer = pq.ParquetWriter(dup_path, batch_dup.schema)
+                dup_writer.write_table(batch_dup)
+        
+        if writer is None:
+            writer = pq.ParquetWriter(output_path, batch_table.schema)
+        writer.write_table(batch_table)
+    
+    # Close writers
+    if writer:
+        writer.close()
+    if dup_writer:
+        dup_writer.close()
+    
+    print(f"Successfully deleted {total_fail} fails.")
+    print(f"Total duplicates removed: {total_duplicates}")
+    print(f"Processing time {time()-start_time}")
+    
+    return output_path
+
+def check_integrity_and_sync(
+    parquet_path,
+    img_dir,
+    batch_size=1000,
+    filename_column="filename",
+    dry_run=False,
+    suffix="_cleaned",
+    out_path=None):
     """From a Parquet file and a folder of images. Check if there is a perfect match between them.
     Remove Parquet rows or files if no match is found between the two, meaning that, if a file is not listed in the Parquet file, then the file should be removed or if a filename does not correspond to an existing file, then it should be removed from the Parquet file.
     """
@@ -309,6 +408,8 @@ def postprocessing(
     assert isinstance(parquet_path, (Path, str)), f"Error: parquet_path has a wrong type {type(parquet_path)}"
     if isinstance(parquet_path, str): 
         parquet_path = Path(parquet_path)
+
+    
 
     print("Start removing files maked as failed.")
     nofail_path=remove_fails(
