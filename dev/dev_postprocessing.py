@@ -665,7 +665,7 @@ def check_integrity_and_sync(
     print(f"Total number of rows removed from Parquet after synchronization: {total_del}")
     return out_path
 
-def remove_empty_folders(img_dir, dry_run=False):
+def local_remove_empty_folders(img_dir, dry_run=False):
     # Iterate through all the subdirectories and files recursively
     for foldername, subfolders, filenames in os.walk(img_dir, topdown=False):
         # Check if the folder is empty (no files and no subfolders)
@@ -677,6 +677,54 @@ def remove_empty_folders(img_dir, dry_run=False):
                     os.rmdir(foldername)  # Remove the empty folder
                 except OSError as e:
                     print(f"Error removing {foldername}: {e}")
+
+async def remote_remove_empty_folders(sftp_params: AsyncSFTPParams, img_dir: str, dry_run=False):
+    async with asyncssh.connect(**sftp_params) as conn:
+        async with conn.start_sftp_client() as sftp:
+            empty_folders = []
+
+            # List subdirectories recursively
+            async def find_empty_folders(folder):
+                """Check if a folder is empty"""
+                folder_path = f"{img_dir}/{folder}"
+                try:
+                    items = await sftp.listdir(folder_path)
+                    if not items:  # Folder is empty
+                        return folder_path
+                except asyncssh.SFTPError:
+                    return None  # Ignore inaccessible folders
+                return None
+
+            try:
+                all_folders = await sftp.listdir(img_dir)  # Get first-level subfolders
+                tasks = [find_empty_folders(folder) for folder in all_folders]
+                
+                # Run directory checks in parallel with tqdm progress bar
+                results = await tqdm.gather(*tasks, desc="Scanning folders", unit="folder")
+                empty_folders = [folder for folder in results if folder]  # Remove None values
+
+            except asyncssh.SFTPError:
+                print(f"Error: Unable to list directory {img_dir}")
+                return
+
+            print(f"Empty folders found: {len(empty_folders)}")
+
+            # Remove empty folders in parallel
+            if not dry_run and empty_folders:
+                async def remove_folder(folder):
+                    """Remove an empty folder asynchronously"""
+                    try:
+                        await sftp.rmdir(folder)
+                        return f"Removed: {folder}"
+                    except asyncssh.SFTPError:
+                        return f"Error: Failed to remove {folder}"
+
+                # Run removals in parallel with tqdm
+                delete_tasks = [remove_folder(folder) for folder in empty_folders]
+                delete_results = await tqdm.gather(*delete_tasks, desc="Deleting empty folders", unit="folder")
+
+                for result in delete_results:
+                    print(result)
 
 def postprocessing_v1(
     parquet_path,
@@ -758,10 +806,17 @@ def postprocessing(
     )
     print(f"Files integrity established. Final postprocessed Parquet file is in {postprocessed_path}")
     if remove_itermediate: os.remove(out_path)
-    remove_empty_folders(
-        img_dir=img_dir,
-        dry_run=dry_run,
-    )
+    print("Removing empty folders.")
+    if sftp_params is None:
+        local_remove_empty_folders(
+            img_dir=img_dir,
+            dry_run=dry_run,)
+    else:
+        asyncio.run(remote_remove_empty_folders(
+            sftp_params=sftp_params,
+            img_dir=img_dir,
+            dry_run=dry_run,
+        ))
     print("Done postprocessing.")
 
 if __name__=='__main__':
@@ -787,7 +842,7 @@ if __name__=='__main__':
     postprocessing(
         parquet_path="/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546_processing_metadata.parquet",
         # img_dir="/home/george/codes/gbifxdl/data/classif/mini/images",
-        img_dir="datasets/test7",
+        img_dir="datasets/test9",
         sftp_params=AsyncSFTPParams(
             host="io.erda.au.dk",
             port=2222,
