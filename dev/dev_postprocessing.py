@@ -726,6 +726,50 @@ async def remote_remove_empty_folders(sftp_params: AsyncSFTPParams, img_dir: str
                 for result in delete_results:
                     print(result)
 
+def balanced_list(n: int, p: int):
+    if p > n or p <= 0 or n <= 0:
+        raise ValueError("Ensure 1 <= p <= n and n > 0")
+    
+    base_count = n // p  # Number of times each number should appear
+    remainder = n % p  # Extra numbers to distribute
+    
+    result = []
+    
+    # Distribute base counts equally
+    for i in range(1, p + 1):
+        result.extend([i] * base_count)
+    
+    # Distribute the remainder numbers as evenly as possible
+    for i in range(1, remainder + 1):
+        result.append(i)
+
+    # Shuffle the list before returning it
+    np.random.shuffle(result)
+
+    return result
+
+def add_set_column(parquet_path, batch_size=1000, n_split=5, ood_th=5, species_column="speciesKey"):
+    
+    assert isinstance(parquet_path, (Path, str)), f"Error: parquet_path has a wrong type {type(parquet_path)}"
+    if isinstance(parquet_path, str): 
+        parquet_path = Path(parquet_path)
+    parquet_file = pq.ParquetFile(parquet_path)
+
+    # First pass: sort OOD classes from in distribution classes
+    # Count number of image per species.
+    # Species with less than `ood_th` images are out of the distribution.
+    # Species with more than `ood_th` images are in distribution.
+    species_count = defaultdict(int)
+    for batch in parquet_file.iter_batches(batch_size=batch_size):
+        for h in batch[species_column]:
+            species_count[h] += 1
+    
+    # Second pass: add the set column
+    for batch in parquet_file.iter_batches(batch_size=batch_size):
+        return
+
+
+
 def postprocessing_v1(
     parquet_path,
     img_dir,
@@ -839,16 +883,16 @@ if __name__=='__main__':
     #     dry_run=True,
     # )
 
-    postprocessing(
-        parquet_path="/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546_processing_metadata.parquet",
-        # img_dir="/home/george/codes/gbifxdl/data/classif/mini/images",
-        img_dir="datasets/test9",
-        sftp_params=AsyncSFTPParams(
-            host="io.erda.au.dk",
-            port=2222,
-            username="gmo@ecos.au.dk",
-            client_keys=["~/.ssh/id_rsa"]),
-    )
+    # postprocessing(
+    #     parquet_path="/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546_processing_metadata.parquet",
+    #     # img_dir="/home/george/codes/gbifxdl/data/classif/mini/images",
+    #     img_dir="datasets/test9",
+    #     sftp_params=AsyncSFTPParams(
+    #         host="io.erda.au.dk",
+    #         port=2222,
+    #         username="gmo@ecos.au.dk",
+    #         client_keys=["~/.ssh/id_rsa"]),
+    # )
 
     # postprocessing_v1(
     #     parquet_path="/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546_processing_metadata.parquet",
@@ -862,3 +906,15 @@ if __name__=='__main__':
     # )
 
     # remove_empty_folders(img_dir="/home/george/codes/gbifxdl/data/classif/mini/images", dry_run=True)
+
+    start=time()
+    for i in range(1000):
+        balanced_list(n=1000, p=20)
+    print("With numpy array time:", time()-start)
+
+    start=time()
+    for i in range(1000):
+        create_balanced_list(n=1000, p=20)
+    print("Without numpy array time:", time()-start)
+
+    print(create_balanced_list(10,3))
