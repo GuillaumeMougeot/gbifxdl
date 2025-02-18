@@ -19,8 +19,6 @@ import hashlib
 import logging
 from datetime import datetime
 
-from sklearn.model_selection import StratifiedKFold
-import subprocess
 from collections import defaultdict
 
 import mmh3
@@ -47,6 +45,8 @@ if sys.version_info >= (3, 8):
 else:
     from typing_extensions import TypedDict
 from typing import Optional
+
+import numpy as np # for random shuffle in postprocessing
 
 __all__ = [
     "post",
@@ -759,6 +759,7 @@ def config_preprocess_occurrences_stream(
         chunk_size=chunk_size,
     )
 
+
 def sample_per_species(parquet_path: str, max_img_spc: int = 500, random_seed: int = 42):
     """Sample `max_img_spc` rows per species in the occurrence file,
     if the number of images for this species is higher than `max_img_spc`.
@@ -822,6 +823,7 @@ class AsyncSFTPParams(TypedDict):
     port: int
     username: str
     client_keys: list[str]
+
 
 class AsyncImagePipeline:
     def __init__(
@@ -1434,246 +1436,477 @@ class AsyncImagePipeline:
 # - add a column for cross-validation
 
 
-def dropna(occurrences: Path):
-    """Remove None rows in the dictionary."""
-    df = pd.read_parquet(occurrences)
-    df = df.dropna(subset="filename")
-    df.to_parquet(occurrences, engine="pyarrow", compression="gzip")
+def remove_fails_and_duplicates(
+    parquet_path,
+    batch_size=1000,
+    status_column="status",
+    img_hash_column="img_hash",
+    remove_fails=True,
+    deduplicate=True,
+    fail_suffix="_nofail",
+    dedup_suffix="_deduplicated",
+    dup_suffix="_duplicates",
+):
+    """Processes a Parquet file by removing failures and/or deduplicating entries."""
+    assert isinstance(parquet_path, (Path, str)), f"Error: parquet_path has a wrong type {type(parquet_path)}"
+    if isinstance(parquet_path, str):
+        parquet_path = Path(parquet_path)
+    
+    start_time = time()
+    parquet_file = pq.ParquetFile(parquet_path)
+    
+    # Initialize output paths
+    output_path = parquet_path
+    if remove_fails:
+        output_path = output_path.with_stem(output_path.stem + fail_suffix)
+    if deduplicate:
+        output_path = output_path.with_stem(output_path.stem + dedup_suffix)
+    
+    dup_path = parquet_path.with_stem(parquet_path.stem + dup_suffix) if deduplicate else None
+    
+    # First pass: Count occurrences of each hash if deduplication is enabled
+    # TODO: currently, if a duplicate is found in the occurrences then all 
+    # duplicated occurrences will be removed. But this is an issue when duplicates 
+    # belong to the same species, meaning that the same insect is represented. 
+    # In this case, the duplicates should not be removed.
+    hash_count = defaultdict(int) if deduplicate else None
+    if deduplicate:
+        for batch in parquet_file.iter_batches(batch_size=batch_size):
+            for h in batch[img_hash_column]:
+                hash_count[h] += 1
+    
+    # Second pass: Process the data
+    writer = None
+    dup_writer = None if deduplicate else None
+    total_fail = 0
+    total_duplicates = 0
+    
+    for batch in parquet_file.iter_batches(batch_size=batch_size):
+        batch_table = pa.table(batch)
+        mask = np.ones(len(batch), dtype=bool)
+        
+        # Remove failures
+        if remove_fails:
+            fail_mask = np.array([status.split("_")[1] == "failed" for status in batch[status_column].to_pylist()])
+            num_fails = fail_mask.sum()
+
+            if num_fails > 0:
+                batch_table = batch_table.filter(~fail_mask)
+                total_fail += fail_mask.sum()
+
+        # Deduplicate
+        if deduplicate:
+            dup_mask = np.array([hash_count[h] > 1 for h in batch_table[img_hash_column]])
+            total_duplicates += dup_mask.sum()
+            
+            if dup_mask.sum() > 0:
+                batch_dup = batch_table.filter(dup_mask)
+                batch_table = batch_table.filter(~dup_mask)
+                
+                if dup_writer is None:
+                    dup_writer = pq.ParquetWriter(dup_path, batch_dup.schema)
+                dup_writer.write_table(batch_dup)
+        
+        if writer is None:
+            writer = pq.ParquetWriter(output_path, batch_table.schema)
+        writer.write_table(batch_table)
+    
+    # Close writers
+    if writer:
+        writer.close()
+    if dup_writer:
+        dup_writer.close()
+    
+    print(f"Successfully deleted {total_fail} fails.")
+    print(f"Total duplicates removed: {total_duplicates}")
+    print(f"Processing time {time()-start_time}")
+    
+    return output_path
 
 
-def check_duplicates(config, occurrences: Path):
-    """Finds and removes original and duplicate images if they are in different subfolders."""
+def local_remove_extra_files(img_dir, parquet_filenames, dry_run=False):
+    # List files to remove
+    filenames_dict = dict()
+    for r, _, files in os.walk(img_dir):
+        for f in files:
+            filenames_dict[f] = os.path.basename(r)  
+    filenames_set = set(filenames_dict.keys())
 
-    print("Checking for duplicates...")
+    # Compare the two sets to find extra
+    extra_files = filenames_set - parquet_filenames
+    missing_files = parquet_filenames - filenames_set
 
-    df = pd.read_parquet(occurrences)
-    removed_files = []
-    removed_files_log = Path(config["dataset_dir"]) / "removed_files.log"
-    removed_files_logger = open(removed_files_log, "w")
+    print(f"Files found in folders but not in Parquet file: {len(extra_files)}")
+    print(f"Files found in Parquet file but not in folders: {len(missing_files)}")
 
-    do_remote = "remote_dir" in config.keys() and config["remote_dir"] is not None
-    # if do_remote:
-    #     o = urlparse(config['remote_dir'])
-    #     remote_dir = Path(o.path)
-    #     sftp_server = f"{o.scheme}://{o.netloc}"
-    # else:
-    img_dir = Path(config["dataset_dir"]) / "images"
-
-    def remove_files(group):
-        for index, row in group.iterrows():
-            if do_remote:
-                file_path = (
-                    config["remote_dir"]
-                    + "/"
-                    + str(row["speciesKey"])
-                    + "/"
-                    + row["filename"]
-                )
-                lftp_command = f"lftp -c rm {file_path}"
-                print(f"Removed {file_path}")
-                # lftp_command = f'lftp -e "open {stfp_server}; put {img_path} -o {remote_img_path}; bye"'
-                # TODO: fix this: subprocess.CalledProcessError: Command 'lftp -c rm sftp://gmo@ecos.au.dk:@io.erda.au.dk/datasets/test3/5133088/84da5700ecc150bc27104363cad17fc7e21ea20d.jpeg' returned non-zero exit status 1.
-                result = subprocess.run(
-                    lftp_command,
-                    shell=True,
-                    check=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
-            else:
-                file_path = (
-                    img_dir / Path(str(row["speciesKey"])) / Path(row["filename"])
-                )
-                if config["remove_duplicates"] and os.path.exists(file_path):
-                    os.remove(file_path)
-            removed_files.append(file_path)
-            removed_files_logger.write(f"{file_path}\n")
-
-    # Function to process duplicates based on heuristic
-    def process_duplicates(group):
-        if group["speciesKey"].nunique() == 1:
-            remove_files(group.iloc[1:])
-            # # Only one speciesKey, keep one row, delete the duplicates' files
-            # for index, row in group.iloc[1:].iterrows():  # Keep the first row, delete the rest
-            #     if do_remote:
-            #         file_path = config['remote_dir'] + "/" + str(row['speciesKey']) + "/" + row['filename']
-            #         lftp_command = f'lftp -c rm {file_path}'
-            #         print(f"Removed {file_path}")
-            #         # lftp_command = f'lftp -e "open {stfp_server}; put {img_path} -o {remote_img_path}; bye"'
-            #         result = subprocess.run(lftp_command, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            #     else:
-            #         file_path = img_dir/Path(str(row['speciesKey']))/Path(row['filename'])
-            #         if config['remove_duplicates'] and os.path.exists(file_path):
-            #             os.remove(file_path)
-            #     removed_files.append(file_path)
-            return group.iloc[:1]  # Keep only the first row
-
+    # Remove extra files
+    for f in extra_files:
+        to_remove = os.path.join(img_dir, filenames_dict[f], f)
+        assert os.path.isfile(to_remove), f"Error: file {to_remove} not found."
+        if dry_run:
+            print("Will be removed:", to_remove)
         else:
-            # Multiple speciesKey, remove all rows and delete associated files
-            remove_files(group)
-            # for index, row in group.iterrows():
-            #     file_path = img_dir/Path(str(row['speciesKey']))/Path(row['filename'])
-            #     if config['remove_duplicates'] and os.path.exists(file_path):
-            #         os.remove(file_path)
-            #     removed_files.append(file_path)
-
-            # Return an empty DataFrame for this group
-            return pd.DataFrame(columns=group.columns)
-
-    # Apply the function to each group of sha256
-    df = df.groupby("sha256", group_keys=False)[list(df.keys())].apply(
-        process_duplicates
-    )
-
-    # Stores the results
-    df.to_parquet(occurrences, engine="pyarrow", compression="gzip")
-
-    print(f"{len(removed_files)} duplicates were removed.")
-
-    # Close logger
-    removed_files_logger.close()
-
-    # Stores removed file names
-    # removed_files_log = Path(config['dataset_dir']) / 'removed_files.log'
-    # with open(removed_files_log, 'w') as f:
-    #     for file in removed_files:
-    #         f.write(f"{file}\n")
+            try:
+                os.remove(to_remove)
+            except FileNotFoundError:
+                print(f"File to remove not found {to_remove}")
+    return missing_files
 
 
-def remove_empty_folders(config):
-    img_dir = Path(config["dataset_dir"]) / "images"
+async def remote_remove_extra_files(
+    sftp_params: AsyncSFTPParams,
+    img_dir: str,
+    parquet_filenames,
+    dry_run=False):
+    async with asyncssh.connect(**sftp_params) as conn:
+        async with conn.start_sftp_client() as sftp:
+            filenames_dict = {}
 
+            # List subdirectories in img_dir
+            try:
+                subdirs = await sftp.listdir(img_dir)
+                tasks = []
+
+                async def list_files(subdir):
+                    """Fetch file list for a given subdir"""
+                    subdir_path = f"{img_dir}/{subdir}"
+                    try:
+                        files = await sftp.listdir(subdir_path)
+                        return {f: subdir for f in files}
+                    except (OSError, asyncssh.SFTPError):
+                        print(f"Warning: Failed to list files in {subdir_path}")
+                        return {}
+
+                # Run directory listing in parallel with tqdm
+                for subdir in subdirs:
+                    tasks.append(list_files(subdir))
+                
+                results = await tqdm.gather(*tasks, desc="Scanning remote directories", unit="folder")
+
+                # Merge results into filenames_dict
+                for result in results:
+                    filenames_dict.update(result)
+
+            except (OSError, asyncssh.SFTPError):
+                print(f"Error: Unable to list directory {img_dir}")
+                return set()
+
+            filenames_set = set(filenames_dict.keys())
+
+            # Compare to find extra and missing files
+            extra_files = filenames_set - parquet_filenames
+            missing_files = parquet_filenames - filenames_set
+
+            print(f"Files found in folders but not in Parquet file: {len(extra_files)}")
+            print(f"Files found in Parquet file but not in folders: {len(missing_files)}")
+
+            # Remove extra files in parallel
+            if not dry_run and extra_files:
+                delete_tasks = []
+
+                async def remove_file(f):
+                    """Remove a single file asynchronously"""
+                    to_remove = f"{img_dir}/{filenames_dict[f]}/{f}"
+                    try:
+                        await sftp.remove(to_remove)
+                        return f"Removed: {to_remove}"
+                    except asyncssh.SFTPError:
+                        return f"Error: Failed to remove {to_remove}"
+
+                # Run removals in parallel with tqdm
+                for f in extra_files:
+                    delete_tasks.append(remove_file(f))
+
+                delete_results = await tqdm.gather(*delete_tasks, desc="Deleting files", unit="file")
+                for result in delete_results:
+                    print(result)
+
+            return missing_files
+
+
+def check_integrity_and_sync(
+    parquet_path,
+    img_dir,
+    batch_size=1000,
+    filename_column="filename",
+    dry_run=False,
+    suffix="_cleaned",
+    out_path=None,
+    sftp_params=None):
+    """From a Parquet file and a folder of images. Check if there is a perfect match between them.
+    Remove Parquet rows or files if no match is found between the two, meaning that, if a file is not listed in the Parquet file, then the file should be removed or if a filename does not correspond to an existing file, then it should be removed from the Parquet file.
+    """
+    assert isinstance(parquet_path, (Path, str)), f"Error: parquet_path has a wrong type {type(parquet_path)}"
+    if isinstance(parquet_path, str): 
+        parquet_path = Path(parquet_path)
+    parquet_file = pq.ParquetFile(parquet_path)
+
+    # List of files in a parquet file.
+    parquet_filenames = set()
+    for batch in parquet_file.iter_batches(batch_size=batch_size):
+        for s in batch[filename_column].to_pylist():
+            parquet_filenames.add(s)
+    
+    # Remove extra files (local or remote)
+    if sftp_params:
+        missing_files = asyncio.run(remote_remove_extra_files(
+            sftp_params=sftp_params,
+            img_dir=img_dir,
+            parquet_filenames=parquet_filenames,
+            dry_run=dry_run
+        ))
+    else:
+        missing_files = local_remove_extra_files(
+            img_dir=img_dir,
+            parquet_filenames=parquet_filenames,
+            dry_run=dry_run
+        )
+    
+    # Remove parquet extra files/rows
+    writer = None
+    total_del = 0
+    if out_path is None:
+        out_path = parquet_path.with_stem(parquet_path.stem + suffix)
+    for batch in parquet_file.iter_batches(batch_size=batch_size):
+        batch_table = pa.table(batch)
+        if writer is None:
+            writer = pq.ParquetWriter(out_path, batch_table.schema)
+        mask = np.zeros(len(batch), dtype=bool)
+        for i, s in enumerate(batch[filename_column].to_pylist()):
+            if s in missing_files:
+                mask[i] = True
+
+        # Remove unwanted elements
+        if mask.sum() > 0:
+            total_del += mask.sum()
+            batch_table = batch_table.filter(~mask)
+            
+        writer.write_table(batch_table)
+    
+    if writer:
+        writer.close()
+
+    print(f"Total number of rows removed from Parquet after synchronization: {total_del}")
+    return out_path
+
+
+def local_remove_empty_folders(img_dir, dry_run=False):
     # Iterate through all the subdirectories and files recursively
     for foldername, subfolders, filenames in os.walk(img_dir, topdown=False):
         # Check if the folder is empty (no files and no subfolders)
         if not subfolders and not filenames:
+            if dry_run:
+                print(f"Will remove folder: {foldername}")
+            else:
+                try:
+                    os.rmdir(foldername)  # Remove the empty folder
+                except OSError as e:
+                    print(f"Error removing {foldername}: {e}")
+
+
+async def remote_remove_empty_folders(sftp_params: AsyncSFTPParams, img_dir: str, dry_run=False):
+    async with asyncssh.connect(**sftp_params) as conn:
+        async with conn.start_sftp_client() as sftp:
+            empty_folders = []
+
+            # List subdirectories recursively
+            async def find_empty_folders(folder):
+                """Check if a folder is empty"""
+                folder_path = f"{img_dir}/{folder}"
+                try:
+                    items = await sftp.listdir(folder_path)
+                    if not items:  # Folder is empty
+                        return folder_path
+                except asyncssh.SFTPError:
+                    return None  # Ignore inaccessible folders
+                return None
+
             try:
-                os.rmdir(foldername)  # Remove the empty folder
-                # print(f"Removed empty folder: {foldername}")
-            except OSError as e:
-                print(f"Error removing {foldername}: {e}")
+                all_folders = await sftp.listdir(img_dir)  # Get first-level subfolders
+                tasks = [find_empty_folders(folder) for folder in all_folders]
+                
+                # Run directory checks in parallel with tqdm progress bar
+                results = await tqdm.gather(*tasks, desc="Scanning folders", unit="folder")
+                empty_folders = [folder for folder in results if folder]  # Remove None values
+
+            except asyncssh.SFTPError:
+                print(f"Error: Unable to list directory {img_dir}")
+                return
+
+            print(f"Empty folders found: {len(empty_folders)}")
+
+            # Remove empty folders in parallel
+            if not dry_run and empty_folders:
+                async def remove_folder(folder):
+                    """Remove an empty folder asynchronously"""
+                    try:
+                        await sftp.rmdir(folder)
+                        return f"Removed: {folder}"
+                    except asyncssh.SFTPError:
+                        return f"Error: Failed to remove {folder}"
+
+                # Run removals in parallel with tqdm
+                delete_tasks = [remove_folder(folder) for folder in empty_folders]
+                delete_results = await tqdm.gather(*delete_tasks, desc="Deleting empty folders", unit="folder")
+
+                for result in delete_results:
+                    print(result)
 
 
-def get_image_paths(folder):
-    """
-    Recursively collect all image file paths in a folder.
-    Returns a list of image file paths.
-    """
-    image_paths = []
-    for root, _, files in os.walk(folder):
-        for file in files:
-            if file.lower().endswith(
-                (".png", ".jpg", ".jpeg", ".tiff", ".bmp", ".gif")
-            ):
-                image_paths.append(os.path.join(root, file))
-    return image_paths
+def balanced_list(n: int, p: int, dtype: type):
+    if p > n or p <= 0 or n <= 0:
+        raise ValueError("Ensure 1 <= p <= n and n > 0")
+    
+    base_count = n // p  # Number of times each number should appear
+    remainder = n % p  # Extra numbers to distribute
+    
+    result = []
+    
+    # Distribute base counts equally
+    for i in range(1, p + 1):
+        result.extend([dtype(i)] * base_count)
+    
+    # Distribute the remainder numbers as evenly as possible
+    for i in range(1, remainder + 1):
+        result.append(dtype(i))
+
+    # Shuffle the list before returning it
+    np.random.shuffle(result)
+
+    return result
 
 
-def check_integrity(config, occurrences):
-    """Check if there are as many rows in occurrences as images in img_dir."""
-    img_dir = Path(config["dataset_dir"]) / "images"
-    df = pd.read_parquet(occurrences)
+def add_set_column(
+    parquet_path,
+    batch_size=1000,
+     n_split=5,
+     ood_th=5,
+     species_column="speciesKey",
+     seed=42,
+     out_path=None,
+     suffix="_set"):
+    
+    assert isinstance(parquet_path, (Path, str)), f"Error: parquet_path has a wrong type {type(parquet_path)}"
+    if isinstance(parquet_path, str): 
+        parquet_path = Path(parquet_path)
+    parquet_file = pq.ParquetFile(parquet_path)
 
-    df_paths = [
-        str(img_dir / row["speciesKey"] / row["filename"]) for i, row in df.iterrows()
-    ]
-    df_set = set(df_paths)
+    # Set random seed
+    np.random.seed(seed=seed)
 
-    local_set = set(get_image_paths(img_dir))
+    # First pass: sort OOD classes from in distribution classes
+    # Count number of image per species.
+    # Species with less than `ood_th` images are out of the distribution.
+    # Species with more than `ood_th` images are in distribution.
+    species_count = defaultdict(int)
+    for batch in parquet_file.iter_batches(batch_size=batch_size):
+        for s in batch[species_column]:
+            species_count[s] += 1
+    
+    # Second pass: add the set column
+    species_set = defaultdict(list)
+    writer = None
+    if out_path is None:
+        out_path = parquet_path.with_stem(parquet_path.stem + suffix)
 
-    df_to_remove = df_set - local_set
-    local_to_remove = local_set - df_set
+    for batch in parquet_file.iter_batches(batch_size=batch_size):
+        batch_table = pa.table(batch)
 
-    if len(df_to_remove) > 0:
-        print(
-            f"Some rows ({len(df_to_remove)} rows) in the occurrence file do not correspond to the local file."
-        )
+        if writer is None:
+            writer = pq.ParquetWriter(out_path, batch_table.schema)
 
-    # Remove local files
-    for f in local_to_remove:
-        os.remove(f)
+        set_column = []
 
-    # Remove df rows
-    df = df[~df["filename"].isin(set(str(Path(p).name) for p in df_to_remove))]
+        for i, s in enumerate(batch[species_column]):
+            if species_count[s] <= ood_th:
+                set_column.append("test_ood")
+            else:
+                if s not in species_set.keys():
+                    species_set[s] = balanced_list(species_count[s], n_split, dtype=str)
+                set_column.append(species_set[s].pop())
+                
+        # Append column to table
+        batch_table.append_column("set", [set_column])
 
-    # final_check = get_image_paths(img_dir)
-    # assert len(df)==len(final_check), f"{len(df)}!={len(final_check)}"
+        writer.write_table(batch_table)
+    
+    if writer:
+        writer.close()
 
-    df.to_parquet(occurrences, engine="pyarrow", compression="gzip")
+    return out_path
 
 
-# def add_set_column(df, ood_th, shuffle=True, seed=None):
-def add_set_column(config, occurrences):
-    """Split the train set and the test set.
-
-    There are two test sets:
-    * test_ood with species that have less than ood_th images and are considered as out of distribution
-    * test_in with species in the distribution.
-
-    Species with more than ood_th images are split in 5:
-    * One set is the test_in
-    * Sets 0-3 are validation sets. This is thus a 4-fold splitting.
-    """
-
-    ood_th = config["ood_th"]
-    seed = config["seed"]
-
-    # Read occurrences
-    df = pd.read_parquet(occurrences)
-
-    # Count the number of filenames per speciesKey
-    species_counts = df["speciesKey"].value_counts()
-
-    # Identify species with less than ood_th filenames
-    ood_species = species_counts[species_counts < ood_th].index
-
-    # Create a new 'set' column and initialize it with None
-    df["set"] = None
-
-    # Label rows with 'test_ood' for species with less than ood_th filenames
-    df.loc[df["speciesKey"].isin(ood_species), "set"] = "test_ood"
-
-    # Filter out the ood species for the remaining processing
-    remaining_df = df[~df["speciesKey"].isin(ood_species)]
-
-    # Initialize StratifiedKFold with 5 splits
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
-
-    # Assign fold numbers (0 to 4) to each row
-    for fold, (_, test_index) in enumerate(
-        skf.split(remaining_df, remaining_df["speciesKey"])
+def postprocess(
+    parquet_path,
+    img_dir,
+    batch_size=1000,
+    status_column="status",
+    img_hash_column="img_hash",
+    filename_column="filename",
+    species_column="speciesKey",
+    n_split=5,
+    ood_th=5,
+    dry_run=False,
+    remove_itermediate=True,
+    suffix="_postprocessed",
+    sftp_params=None,
     ):
-        if fold == 0:
-            df.loc[remaining_df.index[test_index], "set"] = "test_in"
-        else:
-            df.loc[remaining_df.index[test_index], "set"] = str(fold - 1)
+    print("Start postprocessing.")
+    assert isinstance(parquet_path, (Path, str)), f"Error: parquet_path has a wrong type {type(parquet_path)}"
+    if isinstance(parquet_path, str): 
+        parquet_path = Path(parquet_path)
 
-    # Save back the file
-    df.to_parquet(occurrences, engine="pyarrow", compression="gzip")
+    postprocessed_path=parquet_path.with_stem(parquet_path.stem + suffix)
+    
+    print("Start removing files maked as failed and duplicates using image hashing.")
+    out1_path=remove_fails_and_duplicates(
+        parquet_path=parquet_path,
+        batch_size=batch_size,
+        status_column=status_column,
+        img_hash_column=img_hash_column,
+    )
+    print("Successfully removed fails and duplicates.")
 
+    print("Start checking integrity and syncronizing local files with Parquet file.")
+    out2_path=check_integrity_and_sync(
+        parquet_path=out1_path,
+        img_dir=img_dir,
+        batch_size=batch_size,
+        filename_column=filename_column,
+        dry_run=dry_run,
+        sftp_params=sftp_params,
+    )
+    print("Files integrity established.")
 
-def postprocessing(config, occurrences):
-    # Remove None images listed in occurrences (corrupted files, etc.)
-    # Updates the occurrence file
-    dropna(occurrences)
+    if remove_itermediate: os.remove(out1_path)
 
-    # Check and remove corrupted files
-    # check_corrupted(config, img_dir)
+    print("Removing empty folders.")
+    if sftp_params is None:
+        local_remove_empty_folders(
+            img_dir=img_dir,
+            dry_run=dry_run,)
+    else:
+        asyncio.run(remote_remove_empty_folders(
+            sftp_params=sftp_params,
+            img_dir=img_dir,
+            dry_run=dry_run,
+        ))
+    print("Empty folders removed.")
 
-    # Check and remove duplicates
-    check_duplicates(config, occurrences)
+    print("Adding `set` column.")
+    add_set_column(
+        parquet_path=out2_path,
+        batch_size=batch_size,
+        n_split=n_split,
+        ood_th=ood_th,
+        species_column=species_column,
+        out_path=postprocessed_path,
+    )
+    print("`set` column added.")
 
-    # Remove empty folders
-    remove_empty_folders(config)
+    if remove_itermediate: os.remove(out2_path)
 
-    # Check if there are as many files as there are rows in the dataframe
-    if "remote_dir" not in config.keys() or config["remote_dir"] is None:
-        check_integrity(config, occurrences)
-
-    # Add cross-validation column
-    if "add_cv_col" in config.keys() and config["add_cv_col"]:
-        add_set_column(config, occurrences)
-
+    print(f"Done postprocessing. Final postprocessed Parquet file is in {postprocessed_path}")
 
 # -----------------------------------------------------------------------------
 # Config and main
