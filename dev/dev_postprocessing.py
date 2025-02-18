@@ -726,7 +726,7 @@ async def remote_remove_empty_folders(sftp_params: AsyncSFTPParams, img_dir: str
                 for result in delete_results:
                     print(result)
 
-def balanced_list(n: int, p: int):
+def balanced_list(n: int, p: int, dtype: type):
     if p > n or p <= 0 or n <= 0:
         raise ValueError("Ensure 1 <= p <= n and n > 0")
     
@@ -737,23 +737,34 @@ def balanced_list(n: int, p: int):
     
     # Distribute base counts equally
     for i in range(1, p + 1):
-        result.extend([i] * base_count)
+        result.extend([dtype(i)] * base_count)
     
     # Distribute the remainder numbers as evenly as possible
     for i in range(1, remainder + 1):
-        result.append(i)
+        result.append(dtype(i))
 
     # Shuffle the list before returning it
     np.random.shuffle(result)
 
     return result
 
-def add_set_column(parquet_path, batch_size=1000, n_split=5, ood_th=5, species_column="speciesKey"):
+def add_set_column(
+    parquet_path,
+    batch_size=1000,
+     n_split=5,
+     ood_th=5,
+     species_column="speciesKey",
+     seed=42,
+     out_path=None,
+     suffix="_set"):
     
     assert isinstance(parquet_path, (Path, str)), f"Error: parquet_path has a wrong type {type(parquet_path)}"
     if isinstance(parquet_path, str): 
         parquet_path = Path(parquet_path)
     parquet_file = pq.ParquetFile(parquet_path)
+
+    # Set random seed
+    np.random.seed(seed=seed)
 
     # First pass: sort OOD classes from in distribution classes
     # Count number of image per species.
@@ -761,14 +772,40 @@ def add_set_column(parquet_path, batch_size=1000, n_split=5, ood_th=5, species_c
     # Species with more than `ood_th` images are in distribution.
     species_count = defaultdict(int)
     for batch in parquet_file.iter_batches(batch_size=batch_size):
-        for h in batch[species_column]:
-            species_count[h] += 1
+        for s in batch[species_column]:
+            species_count[s] += 1
     
     # Second pass: add the set column
+    species_set = defaultdict(list)
+    writer = None
+    if out_path is None:
+        out_path = parquet_path.with_stem(parquet_path.stem + suffix)
+
     for batch in parquet_file.iter_batches(batch_size=batch_size):
-        return
+        batch_table = pa.table(batch)
 
+        if writer is None:
+            writer = pq.ParquetWriter(out_path, batch_table.schema)
 
+        set_column = []
+
+        for i, s in enumerate(batch[species_column]):
+            if species_count[s] <= ood_th:
+                set_column.append("test_ood")
+            else:
+                if s not in species_set.keys():
+                    species_set[s] = balanced_list(species_count[s], n_split, dtype=str)
+                set_column.append(species_set[s].pop())
+                
+        # Append column to table
+        batch_table.append_column("set", [set_column])
+
+        writer.write_table(batch_table)
+    
+    if writer:
+        writer.close()
+
+    return out_path
 
 def postprocessing_v1(
     parquet_path,
@@ -821,6 +858,9 @@ def postprocessing(
     status_column="status",
     img_hash_column="img_hash",
     filename_column="filename",
+    species_column="speciesKey",
+    n_split=5,
+    ood_th=5,
     dry_run=False,
     remove_itermediate=True,
     suffix="_postprocessed",
@@ -830,26 +870,31 @@ def postprocessing(
     assert isinstance(parquet_path, (Path, str)), f"Error: parquet_path has a wrong type {type(parquet_path)}"
     if isinstance(parquet_path, str): 
         parquet_path = Path(parquet_path)
+
+    postprocessed_path=parquet_path.with_stem(parquet_path.stem + suffix)
+    
     print("Start removing files maked as failed and duplicates using image hashing.")
-    out_path=remove_fails_and_duplicates(
+    out1_path=remove_fails_and_duplicates(
         parquet_path=parquet_path,
         batch_size=batch_size,
         status_column=status_column,
         img_hash_column=img_hash_column,
     )
-    print(f"Successfully removed fails and duplicates. New Parquet file is in {out_path}.")
+    print("Successfully removed fails and duplicates.")
+
     print("Start checking integrity and syncronizing local files with Parquet file.")
-    postprocessed_path=check_integrity_and_sync(
-        parquet_path=out_path,
+    out2_path=check_integrity_and_sync(
+        parquet_path=out1_path,
         img_dir=img_dir,
         batch_size=batch_size,
         filename_column=filename_column,
         dry_run=dry_run,
-        out_path=parquet_path.with_stem(parquet_path.stem + suffix),
         sftp_params=sftp_params,
     )
-    print(f"Files integrity established. Final postprocessed Parquet file is in {postprocessed_path}")
-    if remove_itermediate: os.remove(out_path)
+    print("Files integrity established.")
+
+    if remove_itermediate: os.remove(out1_path)
+
     print("Removing empty folders.")
     if sftp_params is None:
         local_remove_empty_folders(
@@ -861,7 +906,22 @@ def postprocessing(
             img_dir=img_dir,
             dry_run=dry_run,
         ))
-    print("Done postprocessing.")
+    print("Empty folders removed.")
+
+    print("Adding `set` column.")
+    add_set_column(
+        parquet_path=out2_path,
+        batch_size=batch_size,
+        n_split=n_split,
+        ood_th=ood_th,
+        species_column=species_column,
+        out_path=postprocessed_path,
+    )
+    print("`set` column added.")
+
+    if remove_itermediate: os.remove(out2_path)
+
+    print(f"Done postprocessing. Final postprocessed Parquet file is in {postprocessed_path}")
 
 if __name__=='__main__':
 
@@ -883,16 +943,16 @@ if __name__=='__main__':
     #     dry_run=True,
     # )
 
-    # postprocessing(
-    #     parquet_path="/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546_processing_metadata.parquet",
-    #     # img_dir="/home/george/codes/gbifxdl/data/classif/mini/images",
-    #     img_dir="datasets/test9",
-    #     sftp_params=AsyncSFTPParams(
-    #         host="io.erda.au.dk",
-    #         port=2222,
-    #         username="gmo@ecos.au.dk",
-    #         client_keys=["~/.ssh/id_rsa"]),
-    # )
+    postprocessing(
+        parquet_path="/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546_processing_metadata.parquet",
+        # img_dir="/home/george/codes/gbifxdl/data/classif/mini/images",
+        img_dir="datasets/test9",
+        sftp_params=AsyncSFTPParams(
+            host="io.erda.au.dk",
+            port=2222,
+            username="gmo@ecos.au.dk",
+            client_keys=["~/.ssh/id_rsa"]),
+    )
 
     # postprocessing_v1(
     #     parquet_path="/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546_processing_metadata.parquet",
@@ -907,14 +967,7 @@ if __name__=='__main__':
 
     # remove_empty_folders(img_dir="/home/george/codes/gbifxdl/data/classif/mini/images", dry_run=True)
 
-    start=time()
-    for i in range(1000):
-        balanced_list(n=1000, p=20)
-    print("With numpy array time:", time()-start)
-
-    start=time()
-    for i in range(1000):
-        create_balanced_list(n=1000, p=20)
-    print("Without numpy array time:", time()-start)
-
-    print(create_balanced_list(10,3))
+    # add_set_column(
+    #     parquet_path="/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546_processing_metadata_postprocessed.parquet",
+    #     batch_size=1000,
+    # )
