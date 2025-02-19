@@ -679,20 +679,20 @@ async def measure_speed(sftp, files, local_path, max_requests=16, parallel=False
 
 if __name__=="__main__":
     out_path = sample_from_parquet(
-        parquet_path="/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546_processing_metadata_postprocessed.parquet",
-        p=1,
+        parquet_path="data\\classif\\lepi\\0061420-241126133413365_sampled_processing_metadata_postprocessed.parquet",
+        p=5,
         )
 
-    # asyncio.run(download_files_from_sftp(
-    #     parquet_path=out_path,
-    #     sftp_params=AsyncSFTPParams(
-    #         host="io.erda.au.dk",
-    #         port=2222,
-    #         username="gmo@ecos.au.dk",
-    #         client_keys=["~/.ssh/id_rsa"]),
-    #     remote_base_path="datasets/test9",
-    #     local_out_dir="/home/george/codes/gbifxdl/data/classif/mini/sampled_for_annotation"
-    # ))
+    asyncio.run(download_files_from_sftp(
+        parquet_path=out_path,
+        sftp_params=AsyncSFTPParams(
+            host="io.erda.au.dk",
+            port=2222,
+            username="gmo@ecos.au.dk",
+            client_keys=["C:\\Users\\au761367\\.ssh\\id_rsa"]),
+        remote_base_path="datasets/lepi",
+        local_out_dir="data\\classif\\lepi\\sampled_for_annotation"
+    ))
 
     # asyncio.run(download_files_from_sftp_perf(
     #     parquet_path=out_path,
@@ -727,12 +727,12 @@ if __name__=="__main__":
     #     local_out_dir="/home/george/codes/gbifxdl/data/classif/mini/sampled_for_annotation"
     # )
 
-    download_files_with_lftp(
-        parquet_path=out_path,
-        remote_base_path="datasets/test9",
-        local_out_dir="/home/george/codes/gbifxdl/data/classif/mini/sampled_for_annotation",
-        n=32,
-    )
+    # download_files_with_lftp(
+    #     parquet_path=out_path,
+    #     remote_base_path="datasets/test9",
+    #     local_out_dir="/home/george/codes/gbifxdl/data/classif/mini/sampled_for_annotation",
+    #     n=32,
+    # )
     
     # asyncio.run(benchmark_sftp_download(
     #     parquet_path=out_path,
