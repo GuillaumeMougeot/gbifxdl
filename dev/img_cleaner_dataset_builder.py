@@ -683,16 +683,16 @@ if __name__=="__main__":
         p=1,
         )
 
-    # asyncio.run(download_files_from_sftp(
-    #     parquet_path=out_path,
-    #     sftp_params=AsyncSFTPParams(
-    #         host="io.erda.au.dk",
-    #         port=2222,
-    #         username="gmo@ecos.au.dk",
-    #         client_keys=["~/.ssh/id_rsa"]),
-    #     remote_base_path="datasets/test9",
-    #     local_out_dir="/home/george/codes/gbifxdl/data/classif/mini/sampled_for_annotation"
-    # ))
+    asyncio.run(download_files_from_sftp(
+        parquet_path=out_path,
+        sftp_params=AsyncSFTPParams(
+            host="io.erda.au.dk",
+            port=2222,
+            username="gmo@ecos.au.dk",
+            client_keys=["~/.ssh/id_rsa"]),
+        remote_base_path="datasets/test9",
+        local_out_dir="/home/george/codes/gbifxdl/data/classif/mini/sampled_for_annotation"
+    ))
 
     # asyncio.run(download_files_from_sftp_perf(
     #     parquet_path=out_path,
@@ -727,12 +727,12 @@ if __name__=="__main__":
     #     local_out_dir="/home/george/codes/gbifxdl/data/classif/mini/sampled_for_annotation"
     # )
 
-    download_files_with_lftp(
-        parquet_path=out_path,
-        remote_base_path="datasets/test9",
-        local_out_dir="/home/george/codes/gbifxdl/data/classif/mini/sampled_for_annotation",
-        n=32,
-    )
+    # download_files_with_lftp(
+    #     parquet_path=out_path,
+    #     remote_base_path="datasets/test9",
+    #     local_out_dir="/home/george/codes/gbifxdl/data/classif/mini/sampled_for_annotation",
+    #     n=32,
+    # )
     
     # asyncio.run(benchmark_sftp_download(
     #     parquet_path=out_path,

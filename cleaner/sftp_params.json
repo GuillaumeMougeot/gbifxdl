@@ -1,0 +1,6 @@
+{
+    "host": "io.erda.au.dk",
+    "port": 2222,
+    "username": "gmo@ecos.au.dk",
+    "client_keys": ["~/.ssh/id_rsa"]
+}
