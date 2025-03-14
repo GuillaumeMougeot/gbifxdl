@@ -1469,7 +1469,7 @@ def remove_fails_and_duplicates(
     if isinstance(parquet_path, str):
         parquet_path = Path(parquet_path)
     
-    start_time = time()
+    start_time = time.time()
     parquet_file = pq.ParquetFile(parquet_path)
     
     # Initialize output paths
@@ -1536,7 +1536,7 @@ def remove_fails_and_duplicates(
     
     print(f"Successfully deleted {total_fail} fails.")
     print(f"Total duplicates removed: {total_duplicates}")
-    print(f"Processing time {time()-start_time}")
+    print(f"Processing time {time.time()-start_time}")
     
     return output_path
 
@@ -1829,9 +1829,6 @@ def add_set_column(
     for batch in parquet_file.iter_batches(batch_size=batch_size):
         batch_table = pa.table(batch)
 
-        if writer is None:
-            writer = pq.ParquetWriter(out_path, batch_table.schema)
-
         set_column = []
 
         for i, s in enumerate(batch[species_column]):
@@ -1843,7 +1840,10 @@ def add_set_column(
                 set_column.append(species_set[s].pop())
                 
         # Append column to table
-        batch_table.append_column("set", [set_column])
+        batch_table=batch_table.append_column("set", [set_column])
+
+        if writer is None:
+            writer = pq.ParquetWriter(out_path, batch_table.schema)
 
         writer.write_table(batch_table)
     

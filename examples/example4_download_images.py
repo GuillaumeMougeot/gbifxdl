@@ -1,6 +1,7 @@
 # Once the Parquet file generated, images can be downloaded with asynchronous 
 # programming.
-# The AsyncImagePipeline also allows to process the 
+# The AsyncImagePipeline also allows to process the images online, 
+# while downloading them.
 
 from gbifxdl import AsyncImagePipeline, AsyncSFTPParams
 from gbifxdl.crop_img import Cropper
