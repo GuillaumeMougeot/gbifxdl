@@ -49,18 +49,35 @@ from typing import Optional
 import numpy as np # for random shuffle in postprocessing
 
 __all__ = [
+    # Posting API
     "post",
     "poll_status",
     "config_post",
+
+    # Occurrence downloading API
     "download_occurrences",
     "config_download_occurrences",
+
+    # Preprocessing API
     "preprocess_occurrences",
     "config_preprocess_occurrences",
     "preprocess_occurrences_stream",
     "config_preprocess_occurrences_stream",
+    "sample_per_species",
+
+    # Image downloading/uploading API
     "AsyncSFTPParams",
     "AsyncImagePipeline",
-    "sample_per_species",
+
+    # Postprocessing API
+    "remove_fails_and_duplicates",
+    "local_remove_extra_files",
+    "remote_remove_extra_files",
+    "check_integrity_and_sync",
+    "local_remove_empty_folders",
+    "remote_remove_empty_folders",
+    "add_set_column",
+    "postprocess",
 ]
 
 # -----------------------------------------------------------------------------

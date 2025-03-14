@@ -943,26 +943,20 @@ if __name__=='__main__':
     #     dry_run=True,
     # )
 
+    postprocessing(
+        parquet_path="/home/george/codes/gbifxdl/data/mini/0013397-241007104925546_processing_metadata.parquet",
+        img_dir="data/mini/images",
+    )
+
     # postprocessing(
-    #     parquet_path="/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546_processing_metadata.parquet",
-    #     # img_dir="/home/george/codes/gbifxdl/data/classif/mini/images",
-    #     img_dir="datasets/test9",
+    #     parquet_path="/home/george/codes/gbifxdl/data/classif/lepi/0061420-241126133413365_sampled_processing_metadata.parquet",
+    #     img_dir="datasets/lepi",
     #     sftp_params=AsyncSFTPParams(
     #         host="io.erda.au.dk",
     #         port=2222,
     #         username="gmo@ecos.au.dk",
     #         client_keys=["~/.ssh/id_rsa"]),
     # )
-
-    postprocessing(
-        parquet_path="/home/george/codes/gbifxdl/data/classif/lepi/0061420-241126133413365_sampled_processing_metadata.parquet",
-        img_dir="datasets/lepi",
-        sftp_params=AsyncSFTPParams(
-            host="io.erda.au.dk",
-            port=2222,
-            username="gmo@ecos.au.dk",
-            client_keys=["~/.ssh/id_rsa"]),
-    )
 
     # postprocessing_v1(
     #     parquet_path="/home/george/codes/gbifxdl/data/classif/mini/0013397-241007104925546_processing_metadata.parquet",
