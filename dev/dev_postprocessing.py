@@ -726,7 +726,13 @@ async def remote_remove_empty_folders(sftp_params: AsyncSFTPParams, img_dir: str
                 for result in delete_results:
                     print(result)
 
-def balanced_list(n: int, p: int, dtype: type):
+def balanced_list(n: int, p: int, dtype: type = int, start: int = 0):
+    """Returns a list of uniformely distributed integers of values ranging from
+    `start` to `p + start`.
+
+    `dtype` argument allows to change the output data type, which is `int` by 
+    default.
+    """
     if p > n or p <= 0 or n <= 0:
         raise ValueError("Ensure 1 <= p <= n and n > 0")
     
@@ -736,17 +742,18 @@ def balanced_list(n: int, p: int, dtype: type):
     result = []
     
     # Distribute base counts equally
-    for i in range(1, p + 1):
+    for i in range(start, p + start):
         result.extend([dtype(i)] * base_count)
     
     # Distribute the remainder numbers as evenly as possible
-    for i in range(1, remainder + 1):
+    for i in range(start, remainder + start):
         result.append(dtype(i))
 
     # Shuffle the list before returning it
     np.random.shuffle(result)
 
     return result
+
 
 def add_set_column(
     parquet_path,
@@ -784,9 +791,6 @@ def add_set_column(
     for batch in parquet_file.iter_batches(batch_size=batch_size):
         batch_table = pa.table(batch)
 
-        if writer is None:
-            writer = pq.ParquetWriter(out_path, batch_table.schema)
-
         set_column = []
 
         for i, s in enumerate(batch[species_column]):
@@ -798,7 +802,10 @@ def add_set_column(
                 set_column.append(species_set[s].pop())
                 
         # Append column to table
-        batch_table.append_column("set", [set_column])
+        batch_table=batch_table.append_column("set", [set_column])
+
+        if writer is None:
+            writer = pq.ParquetWriter(out_path, batch_table.schema)
 
         writer.write_table(batch_table)
     
