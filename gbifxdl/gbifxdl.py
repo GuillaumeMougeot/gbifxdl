@@ -307,7 +307,7 @@ def post(payload: str, pwd: str, wait: bool = True):
     with open(payload, "r") as f:
         payload = json.load(f)
 
-    print("Posting occurence request...")
+    print("Posting occurrence request...")
     response = requests.post(
         api_endpoint,
         headers=headers,
@@ -322,7 +322,7 @@ def post(payload: str, pwd: str, wait: bool = True):
         # download_key = response.json().get("key")
         download_key = response.text
         print(
-            f"Request posted successfully. GBIF is preparing the occurence file for download. Please wait. Download key: {download_key}"
+            f"Request posted successfully. GBIF is preparing the occurrence file for download. Please wait. Download key: {download_key}"
         )
 
         # Polling to check the status of the download
