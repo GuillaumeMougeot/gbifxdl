@@ -847,6 +847,7 @@ class AsyncImagePipeline:
         self,
         parquet_path: str,
         output_dir: str,
+        output_parquet_path: str = None,
         url_column: str = "url",
         max_concurrent_download: int = 128,
         max_download_attempts: int = 10,
@@ -920,9 +921,15 @@ class AsyncImagePipeline:
         # self.metadata_buffer = defaultdict(list)
         self.metadata_buffer = [{}]
         # Output Parquet file
-        self.metadata_file = self.parquet_path.parent / (
-            self.parquet_path.stem + "_processing_metadata.parquet"
-        )
+        if output_parquet_path is None:
+            self.metadata_file = self.parquet_path.parent / (
+                self.parquet_path.stem + "_processing_metadata.parquet"
+            )
+        else:
+            self.metadata_file = Path(output_parquet_path)
+            assert os.path.exists(self.metadata_file.parent), (
+                f"{self.metadata_file.parent} is not a folder. "
+                "Create it before running download.")
         # Metadata index (mdid)
         # if the milestone turns True and if all "done" in the metadata buffer are "True",
         # then the metadata is ready to be written in the output file
