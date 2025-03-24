@@ -930,6 +930,9 @@ class AsyncImagePipeline:
             assert os.path.exists(self.metadata_file.parent), (
                 f"{self.metadata_file.parent} is not a folder. "
                 "Create it before running download.")
+            assert self.metadata_file != self.parquet_file, (
+                "Input parquet path must be different from output parquet path."
+            )
         # Metadata index (mdid)
         # if the milestone turns True and if all "done" in the metadata buffer are "True",
         # then the metadata is ready to be written in the output file
