@@ -3,6 +3,7 @@ import sys
 import shutil
 import cv2
 import argparse
+from unicodedata import normalize
 
 
 def get_screen_resolution():
@@ -65,7 +66,7 @@ def main():
     # Gather images from input folder
     valid_exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif')
     images = sorted([
-        os.path.join(args.input_folder, f)
+        os.path.join(args.input_folder, normalize('NFC', f))
         for f in os.listdir(args.input_folder)
         if f.lower().endswith(valid_exts)
     ])
@@ -91,6 +92,7 @@ def main():
     while id < len(images):
         image_path = images[id]
         image_name = os.path.basename(image_path)
+        print(f"Image name: {image_name}")
         img = cv2.imread(image_path)
         if img is None:
             print(f"Could not load image: {image_path}. Skipping.")
