@@ -326,10 +326,8 @@ def post(payload: str, pwd: str, wait: bool = True):
         )
 
         # Polling to check the status of the download
-        if poll_status(download_key=download_key, wait=wait) == "succeeded":
-            return download_key
-        else:
-            return None
+        poll_status(download_key=download_key, wait=wait) == "succeeded"
+        return download_key
     else:
         print(f"Failed to post request. HTTP Status Code: {response.status_code}")
         print(f"Response: {response.text}")
