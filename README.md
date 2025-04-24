@@ -103,7 +103,7 @@ postprocess(
 
 The scripts above are used in practice in the [usecases folder](https://github.com/GuillaumeMougeot/gbifxdl/tree/main/usecases).
 
-For more details examples, look at the [examples folder](https://github.com/GuillaumeMougeot/gbifxdl/tree/main/examples).
+For more detailed examples, look at the [examples folder](https://github.com/GuillaumeMougeot/gbifxdl/tree/main/examples).
 
 ## Contributing
 
