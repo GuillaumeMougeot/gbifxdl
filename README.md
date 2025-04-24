@@ -116,3 +116,7 @@ If you would like to contribute to the code, feel free to send a pull request.
 For any other request, don't hesitate to reach out by sending me an email.
 
 Many thanks to anyone interested by this work.
+
+## Acknowledgement
+
+This work has been inspired by the amazing works done in [gbif-dl](https://github.com/plantnet/gbif-dl/tree/master) and in [ami-ml](https://github.com/RolnickLab/ami-ml/tree/main/src/dataset_tools).
