@@ -42,6 +42,8 @@ with open(download_key_path, "w") as file:
     file.write(download_key)
 ```
 
+> Note: if you don't have a predicate yet but you have a list of species or genus or family or any other taxa, you could use this [online lookup tool](https://www.gbif.org/tools/species-lookup) to get a list of GBIF ids. Then you could look at [the payload/predicate template](https://github.com/GuillaumeMougeot/gbifxdl/blob/main/examples/payload_template.json) and edit the list of values under the "TAXON_KEY" field.
+
 For the second step, download the occurrences file with:
 ```python
 from gbifxdl import poll_status, download_occurrences
@@ -103,7 +105,7 @@ The scripts above are used in practice in the [usecases folder](https://github.c
 
 For more details examples, look at the [examples folder](https://github.com/GuillaumeMougeot/gbifxdl/tree/main/examples).
 
-## Contribution
+## Contributing
 
 This repo welcomes external contributions!
 
