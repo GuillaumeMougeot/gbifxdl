@@ -846,7 +846,7 @@ class AsyncImagePipeline:
         parquet_path: str,
         output_dir: str,
         output_parquet_path: str = None,
-        url_column: str = "url",
+        url_column: str = "identifier",
         max_concurrent_download: int = 128,
         max_download_attempts: int = 10,
         max_concurrent_processing: int = 4,

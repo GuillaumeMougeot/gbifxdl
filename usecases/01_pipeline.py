@@ -10,7 +10,9 @@ from gbifxdl import (
     poll_status, 
     download_occurrences,
     preprocess_occurrences_stream,
+    preprocess_occurrences,
     AsyncImagePipeline,
+    AsyncSFTPParams,
     postprocess,
     )
 from os.path import join, dirname, realpath
@@ -18,14 +20,18 @@ from pathlib import Path
 
 # Global variables
 download_key_path = "download_key.txt"
-dataset_dir = 'data/classif/insectnet'
+dataset_dir = 'data/classif/traits'
 
 def addcwd(path):
     """Add current Python file workdir to path.
     """
     return join(dirname(realpath(__file__)), path)
 
-def pipeline(download_key_path, dataset_dir, images_dir: str = None):
+def pipeline(
+        download_key_path, 
+        dataset_dir, 
+        images_dir: str = None, 
+        remote_dir: str = None):
     if images_dir is None:
         images_dir = join(dataset_dir, "images")
 
@@ -62,6 +68,12 @@ def pipeline(download_key_path, dataset_dir, images_dir: str = None):
             max_concurrent_download=64,
             verbose_level=0,
             batch_size=1024,
+            # sftp_params=AsyncSFTPParams(
+            # host="io.erda.au.dk",
+            # port=2222,
+            # username="gmo@ecos.au.dk",
+            # client_keys=["~/.ssh/id_rsa"]),
+            # remote_dir="datasets/traits",
         )
         downloader.run()
         return downloader.metadata_file
