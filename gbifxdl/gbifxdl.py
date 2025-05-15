@@ -1090,7 +1090,6 @@ class AsyncImagePipeline:
                                 form, response.headers["content-type"], url
                             )
                             self.logger.error(error_msg)
-                            # raise ValueError(error_msg)
                         else:
                             form = response.headers["content-type"].lower()
 
@@ -1130,9 +1129,21 @@ class AsyncImagePipeline:
             self.logger.error(f"Error downloading {url}: {e}")
             return None
 
-    def compute_hash_and_dimensions(self, img_path):
+    def compute_hash_and_dimensions(self, img_path, resize:int=None):
         """Calculate hash and dimensions of an image."""
         with Image.open(img_path) as img:
+            if resize is not None:
+                assert isinstance(resize, int) and resize > 0, f"Argument `resize` must be a positive integer."
+                # Resize the image
+                original_width, original_height = img.size
+
+                # Determine the scaling factor
+                max_dim = max(original_width, original_height)
+                if max_dim > resize:
+                    scale = resize / max_dim
+                    new_width = int(original_width * scale)
+                    new_height = int(original_height * scale)
+                    img = img.resize((new_width, new_height))
             img_size = img.size
             img_hash = hashlib.sha256(img.tobytes()).hexdigest()
             return img_hash, img_size

@@ -1,0 +1,30 @@
+{
+    "creator": "gmougeot", 
+    "notificationAddresses": [
+        "gmo@ecos.au.dk"
+    ],
+    "sendNotification": true,
+    "format": "DWCA",
+    "predicate": {
+        "type": "and",
+        "predicates": [
+            {
+                "type": "equals",
+                "key": "TAXON_KEY",
+                "value": "797"  
+            },
+            {
+                "type": "equals",
+                "key": "MEDIA_TYPE",
+                "value": "StillImage"
+            },
+            {
+                "type": "in",
+                "key": "BASIS_OF_RECORD",
+                "values": [
+                    "LIVING_SPECIMEN", "OBSERVATION", "HUMAN_OBSERVATION", "MACHINE_OBSERVATION", "OCCURRENCE"
+                ]
+            }
+        ]
+    }
+}

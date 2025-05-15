@@ -68,12 +68,12 @@ def pipeline(
             max_concurrent_download=64,
             verbose_level=0,
             batch_size=1024,
-            # sftp_params=AsyncSFTPParams(
-            # host="io.erda.au.dk",
-            # port=2222,
-            # username="gmo@ecos.au.dk",
-            # client_keys=["~/.ssh/id_rsa"]),
-            # remote_dir="datasets/traits",
+            sftp_params=AsyncSFTPParams(
+            host="io.erda.au.dk",
+            port=2222,
+            username="gmo@ecos.au.dk",
+            client_keys=["~/.ssh/id_rsa"]),
+            remote_dir="datasets/traits",
         )
         downloader.run()
         return downloader.metadata_file

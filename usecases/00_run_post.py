@@ -10,7 +10,7 @@ from gbifxdl import post
 from dotenv import dotenv_values
 from os.path import join, dirname, realpath
 
-payload_path = "payload_traits.json"
+payload_path = "payload_all_lepi.json"
 download_key_path = "download_key.txt"
 
 def addcwd(path):
