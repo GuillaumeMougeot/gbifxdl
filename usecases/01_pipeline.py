@@ -57,7 +57,7 @@ def pipeline(
     if download_path is not None:
         preprocessed_path = preprocess_occurrences_stream(
             dwca_path=download_path,
-            max_img_spc=500, # Maximum number of images per species
+            max_img_spc=2000, # Maximum number of images per species
             log_mem=True)
 
     def download_images():
@@ -68,12 +68,14 @@ def pipeline(
             max_concurrent_download=64,
             verbose_level=0,
             batch_size=1024,
+            resize=512,
+            save2jpg=True,
             sftp_params=AsyncSFTPParams(
             host="io.erda.au.dk",
             port=2222,
             username="gmo@ecos.au.dk",
             client_keys=["~/.ssh/id_rsa"]),
-            remote_dir="datasets/traits",
+            remote_dir="datasets/global_lepi/images",
         )
         downloader.run()
         return downloader.metadata_file

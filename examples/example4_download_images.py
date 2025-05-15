@@ -8,12 +8,13 @@ from gbifxdl.crop_img import Cropper
 
 def download_images():
     downloader = AsyncImagePipeline(
-        parquet_path="data/classif/lepi_small/0060185-241126133413365.parquet",
-        output_dir='data/classif/lepi_small/images',
+        parquet_path="data/lepi_small/0060185-241126133413365_v1.parquet",
+        output_dir='data/lepi_small/images',
         url_column='identifier',
         max_concurrent_download=64,
         verbose_level=0,
         batch_size=1024,
+        resize=512,
     )
     downloader.run()
 
@@ -77,4 +78,5 @@ def download_process_upload_images():
     downloader.run()
 
 if __name__=="__main__":
-    download_upload_images()
+    download_images()
+    # download_upload_images()

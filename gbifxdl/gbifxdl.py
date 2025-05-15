@@ -860,6 +860,8 @@ class AsyncImagePipeline:
         verbose_level: int = 0,  # 0 1 2
         logger=None,
         gpu_image_processor=None,
+        resize: int=None, # Whether to resize the image during processing
+        save2jpg: bool=False, # Whether to save the image in jpg format
     ):
         self.parquet_path = Path(parquet_path)
         self.parquet_file = pq.ParquetFile(self.parquet_path)
@@ -960,6 +962,8 @@ class AsyncImagePipeline:
             self.gpu_image_processor["fn"](
                 device="cpu", **self.gpu_image_processor["kwargs"]
             )
+        self.resize=resize
+        self.save2jpg=save2jpg
 
     def get_model(self, thread_id):
         if not hasattr(self.thread_context, "model"):
@@ -1147,6 +1151,60 @@ class AsyncImagePipeline:
             img_size = img.size
             img_hash = hashlib.sha256(img.tobytes()).hexdigest()
             return img_hash, img_size
+    
+    def resize_img(self, img: Image.Image, resize: int=None) -> Image:
+        if resize is None:
+            return img
+        else:
+            assert isinstance(resize, int) and resize > 0, f"Argument `resize` must be a positive integer."
+            # Resize the image
+            original_width, original_height = img.size
+
+            # Determine the scaling factor
+            max_dim = max(original_width, original_height)
+            if max_dim > resize:
+                scale = resize / max_dim
+                new_width = int(original_width * scale)
+                new_height = int(original_height * scale)
+                img = img.resize((new_width, new_height))
+            return img
+
+    def get_img_size(self, img: Image.Image) -> tuple:
+        """Get image size."""
+        return img.size
+
+    def get_img_hash(self, img: Image.Image) -> str:
+        """Get image hash."""
+        return hashlib.sha256(img.tobytes()).hexdigest()
+    
+    def encode_img_to_jpg(self, img: Image.Image, img_path: str) -> str:
+        """
+        Converts an image to JPEG format if it's not already, replacing the original file.
+
+        Args:
+            img (Image.Image): A PIL Image object.
+            img_path (str): The path of the original image file.
+
+        Returns:
+            str: The path to the new (or unchanged) .jpg image.
+        """
+        img_path = Path(img_path)
+        if img_path.suffix.lower() != '.jpg':
+            new_img_path = img_path.with_suffix('.jpg')
+            try:
+                img = img.convert('RGB')  # JPEG does not support alpha channels
+                img.save(new_img_path, format='JPEG', quality=95)
+            except Exception as e:
+                raise IOError(f"Failed to save image as JPEG to {new_img_path}: {e}")
+
+            try:
+                os.remove(img_path)
+            except OSError as e:
+                self.logger.warn(f"Warning: Failed to delete original file {img_path}: {e}")
+
+            return str(new_img_path.name)
+        else:
+            return str(img_path.name)
 
     def process_image(self, filename: str, folder: str, thread_id=None) -> bool:
         """Crop the image, hash the image, get image size, ..."""
@@ -1164,7 +1222,13 @@ class AsyncImagePipeline:
                     filename = new_filename
                     img_path = os.path.join(self.output_dir, folder, filename)
 
-            img_hash, img_size = self.compute_hash_and_dimensions(img_path)
+            # img_hash, img_size = self.compute_hash_and_dimensions(img_path, resize=self.resize)
+            with Image.open(img_path) as img:
+                img=self.resize_img(img, resize=self.resize)
+                img_size=self.get_img_size(img)
+                img_hash=self.get_img_hash(img)
+                if self.save2jpg:
+                    filename=self.encode_img_to_jpg(img, img_path)
 
             # Add metadata to buffer
             width, height = img_size[0], img_size[1]
