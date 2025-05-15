@@ -1,52 +1,46 @@
-import requests
-from requests.auth import HTTPBasicAuth
-import json
-import time
-from omegaconf import OmegaConf
-import os
-from os.path import join
-import zipfile
-from pathlib import Path
-
-import pyarrow as pa
-import pyarrow.parquet as pq
-import pandas as pd
-
-from dwca.read import DwCAReader
-from dwca.darwincore.utils import qualname as qn
-
-import hashlib
-import logging
-from datetime import datetime
-
-from collections import defaultdict
-
-import mmh3
-import psutil
-import random
-
 # for file transfer
 import asyncio
-import aiofiles
-from aiohttp_retry import RetryClient, ExponentialRetry
-import asyncssh
-from asyncssh import SFTPClient, SFTPError
-from PIL import Image, UnidentifiedImageError
-from concurrent.futures import ThreadPoolExecutor
-from functools import partial
-from tqdm.asyncio import tqdm
+import hashlib
+import json
+import logging
+import os
 import posixpath
-import threading
-
+import random
 import sys
+import threading
+import time
+import zipfile
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from functools import partial
+from os.path import join
+from pathlib import Path
+from typing import Optional
+
+import aiofiles
+import asyncssh
+import mmh3
+import numpy as np  # for random shuffle in postprocessing
+import pandas as pd
+import psutil
+import pyarrow as pa
+import pyarrow.parquet as pq
+import requests
+from aiohttp_retry import ExponentialRetry, RetryClient
+from asyncssh import SFTPClient, SFTPError
+from dwca.darwincore.utils import qualname as qn
+from dwca.read import DwCAReader
+from omegaconf import OmegaConf
+from PIL import Image, UnidentifiedImageError
+from requests.auth import HTTPBasicAuth
+from tqdm.asyncio import tqdm
 
 if sys.version_info >= (3, 8):
     from typing import TypedDict  # pylint: disable=no-name-in-module
 else:
     from typing_extensions import TypedDict
-from typing import Optional
 
-import numpy as np # for random shuffle in postprocessing
 
 __all__ = [
     # Posting API
