@@ -27,6 +27,7 @@ dependencies = [
   "tqdm",
   "pillow",
   "dask",
+  "wget",
 ]
 authors = [
   {name="Guillaume Mougeot", email="guillaume.mougeot@laposte.net"},

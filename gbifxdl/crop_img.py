@@ -1,4 +1,8 @@
-from flat_bug.predictor import Predictor
+try:
+    from flat_bug.predictor import Predictor
+except ImportError:
+    print("Warning: flat-bug is not installed, please install it before using it. Aborting...")
+    exit()
 import torch
 from PIL import Image
 import os
