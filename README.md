@@ -128,7 +128,7 @@ Many thanks to anyone interested by this work.
 
 ## TODO
 
-* [ ] Integrate resizing in the pipeline.
+* [x] Integrate resizing in the pipeline.
 * [ ] Deep learning processing during postprocessing.
  
 ## Acknowledgement
