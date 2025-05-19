@@ -842,7 +842,7 @@ class AsyncImagePipeline:
         output_parquet_path: str = None,
         url_column: str = "identifier",
         max_concurrent_download: int = 128,
-        max_download_attempts: int = 10,
+        max_download_attempts: int = 3,
         max_concurrent_processing: int = 4,
         max_queue_size: int = 100,
         batch_size: int = 65536,
@@ -881,7 +881,7 @@ class AsyncImagePipeline:
         self.retry_options = retry_options or ExponentialRetry(
             attempts=self.max_download_attempts,  # Retry up to 10 times
             statuses={429, 500, 502, 503, 504},  # Retry on server and rate-limit errors
-            start_timeout=10,
+            start_timeout=1,
         )
 
         # Logging setup

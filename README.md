@@ -120,7 +120,7 @@ This repo welcomes external contributions!
 
 If you find an issue, feel free to open it [here](https://github.com/GuillaumeMougeot/gbifxdl/issues).
 
-If you would like to contribute to the code, feel free to send a pull request.
+If you would like to contribute to the code, feel free to send a pull request. Currently, most of the code of this package is stored in a single script in `gbifxdl/src/gbifxdl.py`.
 
 For any other request, don't hesitate to reach out by sending me an email.
 
