@@ -1,8 +1,10 @@
 try:
     from flat_bug.predictor import Predictor
-except ImportError:
-    print("Warning: flat-bug is not installed, please install it before using it. Aborting...")
-    exit()
+except ImportError as e:
+    raise ImportError(
+        "flat-bug is not installed. "
+        "Image cropping functionality will be unavailable unless installed."
+        ) from e
 import torch
 from PIL import Image
 import os
