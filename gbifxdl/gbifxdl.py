@@ -1848,32 +1848,38 @@ async def remote_remove_empty_folders(sftp_params: AsyncSFTPParams, img_dir: str
 
 
 def balanced_list(n: int, p: int, dtype: type = int, start: int = 0):
-    """Returns a list of uniformely distributed integers of values ranging from
-    `start` to `p + start`.
+    """Returns a list of `n` uniformely distributed integers of values ranging 
+    from 0 to `p`. 
 
     `dtype` argument allows to change the output data type, which is `int` by 
     default.
+
+    If n > p, then the function garantees that 0 is part of the output list. 
     """
-    if p > n or p <= 0 or n <= 0:
-        raise ValueError("Ensure 1 <= p <= n and n > 0")
-    
-    base_count = n // p  # Number of times each number should appear
-    remainder = n % p  # Extra numbers to distribute
-    
-    result = []
-    
-    # Distribute base counts equally
-    for i in range(start, p + start):
-        result.extend([dtype(i)] * base_count)
-    
-    # Distribute the remainder numbers as evenly as possible
-    for i in range(start, remainder + start):
-        result.append(dtype(i))
 
-    # Shuffle the list before returning it
-    np.random.shuffle(result)
+    assert p > 0 and n > 0, ValueError("Ensure p and n are positive.")
 
-    return result
+    q = n // p
+    r = n % p
+
+    # Make sure that zero is always part of the list.
+    if r and not q:
+        l1 = [0]
+        l2 = list(range(1,p))
+        random.shuffle(l2)
+        l=l1+l2[:(r-1)]
+    else:
+        l1 = list(range(p))*q
+        l2 = list(range(p))
+        random.shuffle(l2)
+        l=l1+l2[:r]
+
+    random.shuffle(l)
+
+    if dtype != int or start!=0:
+        l = [dtype(e+start) for e in l]
+
+    return l
 
 
 def add_set_column(
@@ -1935,6 +1941,49 @@ def add_set_column(
 
     return out_path
 
+def add_set_column_df(
+    df,
+    n_split=5,
+    ood_th=5,
+    species_column="speciesKey",
+    seed=42
+):
+    """
+    Works with a Pandas DataFrame instead of streaming a Parquet file.
+    
+    Parameters:
+    - df: Input pandas DataFrame.
+    - n_split: Number of splits for in-distribution classes.
+    - ood_th: Threshold to determine out-of-distribution classes.
+    - species_column: Column name for species.
+    - seed: Random seed for reproducibility.
+    
+    Returns:
+    - df: DataFrame with an added "set" column.
+    """
+    random.seed(seed)
+
+    # Count occurrences per species
+    species_counts = df[species_column].value_counts()
+
+    # Identify OOD and in-distribution species
+    id_species = species_counts[species_counts > ood_th].index
+
+    # Assign OOD label first
+    df["set"] = "test_ood"
+    
+    # Filter in-distribution rows
+    id_mask = df[species_column].isin(id_species)
+    id_df = df[id_mask]
+
+    # Assign balanced splits to in-distribution species
+    for species, indices in id_df.groupby(species_column).groups.items():
+        indices = list(indices)
+        n = len(indices)
+        splits = balanced_list(n, n_split)
+        df.loc[indices, "set"] = [str(s) for s in splits]
+
+    return df
 
 def postprocess(
     parquet_path,
