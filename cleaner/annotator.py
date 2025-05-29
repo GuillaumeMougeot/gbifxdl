@@ -1,10 +1,16 @@
+# ******************************************************************************
+# Note: on Windows, make sure to run `chcp 65001` command before exec the script.
+# ******************************************************************************
+
 import os
 import sys
 import shutil
 import cv2
 import argparse
 from unicodedata import normalize
-
+from pathlib import Path
+from PIL import Image
+import numpy as np
 
 def get_screen_resolution():
     """ Get the screen resolution to resize large images accordingly. """
@@ -93,9 +99,16 @@ def main():
         image_path = images[id]
         image_name = os.path.basename(image_path)
         print(f"Image name: {image_name}")
-        img = cv2.imread(image_path)
-        if img is None:
-            print(f"Could not load image: {image_path}. Skipping.")
+        print("*"*10)
+        try:
+            # Open with PIL
+            pil_img = Image.open(image_path).convert('RGB')  # ensure 3 channels
+            # Convert to NumPy array
+            img = np.array(pil_img)
+            # Convert RGB (PIL) to BGR (OpenCV expects BGR)
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        except Exception as e:
+            print(f"Error loading image '{image_path}': {e}. Skipping.")
             id += 1
             continue
 
