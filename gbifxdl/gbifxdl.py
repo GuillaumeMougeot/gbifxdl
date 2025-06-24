@@ -584,6 +584,7 @@ def preprocess_occurrences_stream(
     one_media_per_occurrence: bool = True,
     delete: Optional[bool] = False,
     log_mem: Optional[bool] = False,
+    strict: Optional[bool] = False,
 ) -> str:
     """Process DWCA to retrieve only relevant information and store it in a Parquet file.
 
@@ -609,6 +610,12 @@ def preprocess_occurrences_stream(
         Whether to delete the DWCA file after processing.
     log_mem : bool, default=False
         Whether to log memory information. For debugging.
+    strict : bool, default=False
+        If True, occurence with a complete taxonomic tree will be preserved,
+        i.e. the following keys must be defined "kingdomKey","phylumKey",
+        "classKey","orderKey","familyKey","genusKey","speciesKey". This could be
+        an issue as some occurrences in GBIF do not contain a "classKey"
+        definition.
 
     Returns
     -------
@@ -706,7 +713,7 @@ def preprocess_occurrences_stream(
 
                 # print(f"metadata; {metadata}")
 
-                if any(not metadata.get(key) for key in KEYS_GBIF):
+                if strict and any(not metadata.get(key) for key in KEYS_GBIF):
                     continue
 
                 taxon_key = metadata.get("taxonKey")

@@ -10,7 +10,7 @@ from gbifxdl import post
 from dotenv import dotenv_values
 from os.path import join, dirname, realpath
 
-payload_path = "payload_all_lepi.json"
+payload_path = "../dev/tmp_lh_payload_template.json"
 download_key_path = "download_key.txt"
 
 def addcwd(path):
@@ -18,7 +18,7 @@ def addcwd(path):
     """
     return join(dirname(realpath(__file__)), path)
 
-def run(payload_path, download_path):
+def run(payload_path, download_key_path):
     # Get password from a .env file
     env_path=addcwd(".env")
     env=dotenv_values(env_path)

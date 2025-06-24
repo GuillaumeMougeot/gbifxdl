@@ -20,7 +20,7 @@ from pathlib import Path
 
 # Global variables
 download_key_path = "download_key.txt"
-dataset_dir = 'data/classif/traits'
+dataset_dir = 'data/gbifxdl/laurens'
 
 def addcwd(path):
     """Add current Python file workdir to path.
@@ -70,12 +70,12 @@ def pipeline(
             batch_size=1024,
             resize=512,
             save2jpg=True,
-            sftp_params=AsyncSFTPParams(
-            host="io.erda.au.dk",
-            port=2222,
-            username="gmo@ecos.au.dk",
-            client_keys=["~/.ssh/id_rsa"]),
-            remote_dir="datasets/global_lepi/images",
+            # sftp_params=AsyncSFTPParams(
+            # host="io.erda.au.dk",
+            # port=2222,
+            # username="gmo@ecos.au.dk",
+            # client_keys=["~/.ssh/id_rsa"]),
+            # remote_dir="datasets/global_lepi/images",
         )
         downloader.run()
         return downloader.metadata_file
