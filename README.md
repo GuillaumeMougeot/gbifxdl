@@ -33,9 +33,21 @@ Step-by-step:
 
 ## Usage
 
-The package only provides an Application Programming Interface for now.
+The package provides an Application Programming Interface (API) and a minimal Command Line Interface (CLI).
 
+### Post
 For the first step, post your [GBIF predicate](https://techdocs.gbif.org/en/data-use/api-downloads) with the following command:
+
+```bash
+gbifpost -p payload_DEMO.json -k key.txt --password mysecret
+```
+Arguments:
+--payload, -p : Path to the payload JSON file
+--keyfile, -k : Path to save the download key (default: download_key.txt)
+--password, -w : GBIF password. If not given, it will be read from .env (GBIF_PWD).
+
+Or using the API:
+
 ```python
 from gbifxdl import post
 
@@ -54,6 +66,19 @@ with open(download_key_path, "w") as file:
 > Note: you can also find more about how to write GBIF predicates [here](https://techdocs.gbif.org/en/data-use/api-downloads) and the list of all possible keys [here](https://gbif.github.io/gbif-api/apidocs/org/gbif/api/model/occurrence/search/OccurrenceSearchParameter.html).
 
 > Warning: this first step requires you to have a GBIF account. [Create an account](https://www.gbif.org/user/profile) and then put your user ID in the .json/payload file that you will send to GBIF and pass your GBIF password to the `post` function (careful not to share your password publicly). 
+
+### Pipeline: preprocess, download and postprocess
+
+Run the entire GBIFXDL pipeline with this command:
+```bash
+gbifpipe -d data/gbifxdl/mydataset -k download_key.txt 
+```
+
+Arguments:
+--dataset, -d : Path to the dataset directory
+--keyfile, -k : Path to the download key file (default: download_key.txt)
+
+### ...or step by step with the API:
 
 For the second step, download the occurrences file with:
 ```python
@@ -137,5 +162,6 @@ Many thanks to anyone interested by this work.
 ## Acknowledgement
 
 This work has been inspired by the amazing works done in [gbif-dl](https://github.com/plantnet/gbif-dl/tree/master) and in [ami-ml](https://github.com/RolnickLab/ami-ml/tree/main/src/dataset_tools).
+
 
 
