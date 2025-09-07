@@ -55,7 +55,7 @@ def cli():
     )
 
     args = parser.parse_args()
-    run(args.payload, args.output, pwd=args.password)
+    run(args.payload, args.keyfile, pwd=args.password)
 
 if __name__ == "__main__":
     cli()
