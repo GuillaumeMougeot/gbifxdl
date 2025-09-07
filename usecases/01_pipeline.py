@@ -1,10 +1,9 @@
-# Example of use of POST from the GBIF Occurrence API.
-# See https://techdocs.gbif.org/en/openapi/v1/occurrence for more details.
-# You need to create a account on GBIF to use this example.
-# To use this example, add a file named .env next to this python file.
-# In .env add the following:
-#   GBIF_PWD=your_gbif_password
-# Replace `your_gbif_password` with your GBIF password.
+# Example of use of a complete pipeline in GBIFXDL.
+# After POSTing on GBIF API and the Occurrence file being ready,
+# This script performs the following:
+# - Preprocess the occurrence file
+# - Download the images
+# - Post process the images and the occurrence file.
 
 from gbifxdl import (
     poll_status, 
