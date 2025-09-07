@@ -28,6 +28,7 @@ dependencies = [
   "pillow",
   "dask",
   "wget",
+  "python-dotenv",
 ]
 authors = [
   {name="Guillaume Mougeot", email="guillaume.mougeot@laposte.net"},
