@@ -35,7 +35,7 @@ Step-by-step:
 
 The package only provides an Application Programming Interface for now.
 
-For the first step, post your GBIF predicate with the following command:
+For the first step, post your [GBIF predicate](https://techdocs.gbif.org/en/data-use/api-downloads) with the following command:
 ```python
 from gbifxdl import post
 
@@ -50,6 +50,8 @@ with open(download_key_path, "w") as file:
 ```
 
 > Note: if you don't have a predicate yet but you have a list of species or genus or family or any other taxa, you could use this [online lookup tool](https://www.gbif.org/tools/species-lookup) to get a list of GBIF ids. Then you could look at [the payload/predicate template](https://github.com/GuillaumeMougeot/gbifxdl/blob/main/examples/payload_template.json) and edit the list of values under the "TAXON_KEY" field.
+
+> Note: you can also find more about how to write GBIF predicates [here](https://techdocs.gbif.org/en/data-use/api-downloads) and the list of all possible keys [here](https://gbif.github.io/gbif-api/apidocs/org/gbif/api/model/occurrence/search/OccurrenceSearchParameter.html).
 
 > Warning: this first step requires you to have a GBIF account. [Create an account](https://www.gbif.org/user/profile) and then put your user ID in the .json/payload file that you will send to GBIF and pass your GBIF password to the `post` function (careful not to share your password publicly). 
 
@@ -135,4 +137,5 @@ Many thanks to anyone interested by this work.
 ## Acknowledgement
 
 This work has been inspired by the amazing works done in [gbif-dl](https://github.com/plantnet/gbif-dl/tree/master) and in [ami-ml](https://github.com/RolnickLab/ami-ml/tree/main/src/dataset_tools).
+
 
