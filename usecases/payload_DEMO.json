@@ -1,0 +1,40 @@
+{
+    "creator": "gmougeot", 
+    "format": "DWCA",
+    "predicate": {
+        "type": "and",
+        "predicates": [
+            {
+                "type": "in",
+                "key": "TAXON_KEY",
+                "values": [
+                    "7017", "5343"
+                ]
+            },
+            {
+                "type": "equals",
+                "key": "MEDIA_TYPE",
+                "value": "StillImage"
+            },
+            {
+                "type": "in",
+                "key": "COUNTRY",
+                "values": [
+                    "DK", "GB"
+                ]
+            },
+            {
+                "type": "in",
+                "key": "BASIS_OF_RECORD",
+                "values": [
+                    "LIVING_SPECIMEN", "OBSERVATION", "HUMAN_OBSERVATION", "MACHINE_OBSERVATION", "OCCURRENCE"
+                ]
+            },
+            {
+                "type": "in",
+                "key": "YEAR",
+                "values": ["2017"]
+            }
+        ]
+    }
+}

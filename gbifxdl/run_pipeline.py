@@ -13,22 +13,18 @@ from gbifxdl import (
     AsyncImagePipeline,
     postprocess,
 )
-from os.path import join, dirname, realpath
+from os.path import join
 
-def addcwd(path):
-    """Add current Python file workdir to path."""
-    return join(dirname(realpath(__file__)), path)
 
 def pipeline(
     download_key_path, 
     dataset_dir, 
     images_dir: str = None, 
-    remote_dir: str = None
 ):
     if images_dir is None:
         images_dir = join(dataset_dir, "images")
 
-    with open(addcwd(download_key_path), 'r') as file:
+    with open(download_key_path, 'r') as file:
         download_key = file.read().strip()
 
     # Poll the POST status and wait if not ready
@@ -49,7 +45,8 @@ def pipeline(
     preprocessed_path = preprocess_occurrences_stream(
         dwca_path=download_path,
         max_img_spc=2000,  # Maximum number of images per species
-        log_mem=True
+        log_mem=True,
+        strict=True, # This avoids downloading unlabeled species
     )
 
     # Download images
@@ -84,30 +81,19 @@ def cli():
         description="Run a GBIF download + preprocess + image pipeline."
     )
     parser.add_argument(
+        "--dataset",
+        "-d",
+        help="Path to the output directory",
+    )
+    parser.add_argument(
         "--keyfile",
         "-k",
         default="download_key.txt",
         help="Path to the download key file (default: download_key.txt)",
     )
-    parser.add_argument(
-        "--dataset",
-        "-d",
-        default="data/gbifxdl/laurens",
-        help="Path to the dataset directory (default: data/gbifxdl/laurens)",
-    )
-    parser.add_argument(
-        "--images",
-        "-i",
-        help="Directory to store downloaded images (default: <dataset>/images)",
-    )
-    parser.add_argument(
-        "--remote",
-        "-r",
-        help="Optional remote directory for SFTP upload (default: None)",
-    )
 
     args = parser.parse_args()
-    pipeline(args.keyfile, args.dataset, images_dir=args.images, remote_dir=args.remote)
+    pipeline(args.keyfile, args.dataset)
 
 if __name__ == "__main__":
     cli()

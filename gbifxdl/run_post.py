@@ -24,14 +24,11 @@ def run(payload_path, download_key_path, pwd=None):
             raise ValueError("GBIF_PWD not found in .env and no password provided via CLI.")
         pwd = env["GBIF_PWD"]
 
-    # Load the payload file
-    payload_path = addcwd(payload_path)
-
     # Send a post request to GBIF
     download_key = post(payload_path, pwd=pwd, wait=False)
 
     # Save the download key to a file
-    with open(addcwd(download_key_path), "w") as file:
+    with open(download_key_path, "w") as file:
         file.write(download_key)
 
     print(f"Download key saved to {download_key_path}: {download_key}")
@@ -43,12 +40,11 @@ def cli():
     parser.add_argument(
         "--payload",
         "-p",
-        default="payload_DEMO.json",
-        help="Path to the payload JSON file (default: payload_DEMO.json)",
+        help="Path to the payload JSON file",
     )
     parser.add_argument(
-        "--output",
-        "-o",
+        "--keyfile",
+        "-k",
         default="download_key.txt",
         help="Path to save the download key (default: download_key.txt)",
     )

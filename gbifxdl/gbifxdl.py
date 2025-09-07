@@ -1309,8 +1309,10 @@ class AsyncImagePipeline:
                         "done": False,
                     }
 
+                folder = str(folder)
+                if len(folder)==0: folder = "unlabeled_species" # May occur if 'strict' argument was not used during preprocessing 
                 await self.download_queue.put(
-                    (str(url), str(url_hash), str(form), str(folder))
+                    (str(url), str(url_hash), str(form), folder)
                 )  # Pauses if queue is full
                 count += 1
 
@@ -1451,6 +1453,10 @@ class AsyncImagePipeline:
         # Write the last bits of metadata
         while len(self.metadata_buffer) > 0:
             self._write_metadata_to_parquet()
+        
+        # Close parquet_file
+        if self.metadata_writer is not None:
+            self.metadata_writer.close()
 
         self.logger.info("Pipeline completed.")
 
@@ -1516,6 +1522,10 @@ class AsyncImagePipeline:
         # Write the last bits of metadata
         while len(self.metadata_buffer) > 0:
             self._write_metadata_to_parquet()
+
+        # Close parquet_file
+        if self.metadata_writer is not None:
+            self.metadata_writer.close()
 
         self.logger.info("Pipeline completed.")
 

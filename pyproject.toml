@@ -51,3 +51,7 @@ gpu = [
 [project.urls]
 "Homepage" = "https://github.com/GuillaumeMougeot/gbifxdl"
 "Bug Tracker" = "https://github.com/GuillaumeMougeot/gbifxdl/issues"
+
+[project.scripts]
+gbifpost = "gbifxdl.run_post:cli"
+gbifpipe = "gbifxdl.run_pipeline:cli"
