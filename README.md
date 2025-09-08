@@ -46,8 +46,55 @@ pip install git+https://github.com/GuillaumeMougeot/gbifxdl.git
 
 The package provides an Application Programming Interface (API) and a minimal Command Line Interface (CLI).
 
-### Post
-For the first step, post your [GBIF predicate](https://techdocs.gbif.org/en/data-use/api-downloads) with the following command:
+**Requirements:** To use gbifxdl you **must** create an account on [GBIF website](https://www.gbif.org/user/profile) using an email address and **not** using other connection systems such as "Connect with Google, GitHub or ORCID". This email and username and password will be used when requesting data from GBIF. 
+
+### Step 0: Write a GBIF predicate
+
+[GBIF predicate](https://techdocs.gbif.org/en/data-use/api-downloads) are small JSON files describing the data you want from GBIF. Here is a minimal example that could be called `my_payload.json`:
+
+```json
+{
+    "creator": "your_username",
+    "notificationAddresses": [
+        "your.email@domain.tld"
+    ],
+    "format": "DWCA",
+    "predicate": {
+        "type": "and",
+        "predicates": [
+            {
+                "type": "in",
+                "key": "TAXON_KEY",
+                "values": [
+                    "7017", "5343"
+                ]
+            },
+            {
+                "type": "equals",
+                "key": "MEDIA_TYPE",
+                "value": "StillImage"
+            },
+        ]
+    }
+}
+```
+
+This payload file request GBIF for all images (`StillImage`) of Nymphalidae (`7017`) and Tortricidae (`5343`) families.
+
+To use the above example:
+- Save it in a `choose_a_name.json` file
+- Edit the `creator` field with your GBIF username and the `notificationAddresses` with your email address.
+- You can go to the next step to post this request to GBIF.
+
+To learn more about predicate:
+- More examples are stored in [usecases folder](https://github.com/GuillaumeMougeot/gbifxdl/tree/main/usecases) of this repo. For example, [payload_DEMO.json](https://github.com/GuillaumeMougeot/gbifxdl/blob/main/usecases/payload_DEMO.json) show you how to limit the country and year of the image or to choose the "basis of record" which can be important if you do not want preserved specimens but only living specimens.
+- Check-out the GBIF API documentation about predicates: [GBIF predicate](https://techdocs.gbif.org/en/data-use/api-downloads).
+- Here is the exhaustive of all possible predicate keys: [here](https://gbif.github.io/gbif-api/apidocs/org/gbif/api/model/occurrence/search/OccurrenceSearchParameter.html).
+
+> Note: if you don't have a predicate yet but you have a list of species or genus or family or any other taxa, you could use this [online lookup tool](https://www.gbif.org/tools/species-lookup) to get a list of GBIF ids. Then you could look at [the payload/predicate template](https://github.com/GuillaumeMougeot/gbifxdl/blob/main/examples/payload_template.json) and edit the list of values under the "TAXON_KEY" field.
+
+### Step 1: Post your request to GBIF with GBIFXDL
+**For the first step, post your [GBIF predicate](https://techdocs.gbif.org/en/data-use/api-downloads) with the following command:**
 
 ```bash
 gbifpost -p payload_DEMO.json -k key.txt --password mysecret
@@ -57,7 +104,7 @@ Arguments:
 --keyfile, -k : Path to save the download key (default: download_key.txt)
 --password, -w : GBIF password. If not given, it will be read from .env (GBIF_PWD).
 
-Or using the API:
+**Or using the API:**
 
 ```python
 from gbifxdl import post
@@ -72,15 +119,9 @@ with open(download_key_path, "w") as file:
     file.write(download_key)
 ```
 
-> Note: if you don't have a predicate yet but you have a list of species or genus or family or any other taxa, you could use this [online lookup tool](https://www.gbif.org/tools/species-lookup) to get a list of GBIF ids. Then you could look at [the payload/predicate template](https://github.com/GuillaumeMougeot/gbifxdl/blob/main/examples/payload_template.json) and edit the list of values under the "TAXON_KEY" field.
+### Step 2: preprocess, download and postprocess your images
 
-> Note: you can also find more about how to write GBIF predicates [here](https://techdocs.gbif.org/en/data-use/api-downloads) and the list of all possible keys [here](https://gbif.github.io/gbif-api/apidocs/org/gbif/api/model/occurrence/search/OccurrenceSearchParameter.html).
-
-> Warning: this first step requires you to have a GBIF account. [Create an account](https://www.gbif.org/user/profile) and then put your user ID in the .json/payload file that you will send to GBIF and pass your GBIF password to the `post` function (careful not to share your password publicly). 
-
-### Pipeline: preprocess, download and postprocess
-
-Run the entire GBIFXDL pipeline with this command:
+**Run the entire GBIFXDL pipeline with this command:**
 ```bash
 gbifpipe -d data/gbifxdl/mydataset -k download_key.txt 
 ```
@@ -89,7 +130,7 @@ Arguments:
 --dataset, -d : Path to the dataset directory
 --keyfile, -k : Path to the download key file (default: download_key.txt)
 
-### ...or step by step with the API:
+**...or do this step by step with the API:**
 
 For the second step, download the occurrences file with:
 ```python
@@ -173,6 +214,7 @@ Many thanks to anyone interested by this work.
 ## Acknowledgement
 
 This work has been inspired by the amazing works done in [gbif-dl](https://github.com/plantnet/gbif-dl/tree/master) and in [ami-ml](https://github.com/RolnickLab/ami-ml/tree/main/src/dataset_tools).
+
 
 
 
