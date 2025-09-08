@@ -79,7 +79,9 @@ The package provides an Application Programming Interface (API) and a minimal Co
 }
 ```
 
-This payload file request GBIF for all images (`StillImage`) of Nymphalidae (`7017`) and Tortricidae (`5343`) families.
+This payload file request GBIF for all images (`StillImage`) of Nymphalidae (`7017`) and Tortricidae (`5343`) families. 
+
+> Note: in GBIF taxa are listed using their TAXON_KEY. For a specific taxon, you can find its taxon key, in the URL of this taxon on GBIF website. For example the URL of Tortricidae is [https://www.gbif.org/species/5343](https://www.gbif.org/species/5343). A quick and easy way to get taxon keys from scientific names is to upload a CSV list of species on the GBIF [online lookup tool](https://www.gbif.org/tools/species-lookup). 
 
 To use the above example:
 - Save it in a `choose_a_name.json` file
@@ -90,8 +92,6 @@ To learn more about predicate:
 - More examples are stored in [usecases folder](https://github.com/GuillaumeMougeot/gbifxdl/tree/main/usecases) of this repo. For example, [payload_DEMO.json](https://github.com/GuillaumeMougeot/gbifxdl/blob/main/usecases/payload_DEMO.json) show you how to limit the country and year of the image or to choose the "basis of record" which can be important if you do not want preserved specimens but only living specimens.
 - Check-out the GBIF API documentation about predicates: [GBIF predicate](https://techdocs.gbif.org/en/data-use/api-downloads).
 - Here is the exhaustive of all possible predicate keys: [here](https://gbif.github.io/gbif-api/apidocs/org/gbif/api/model/occurrence/search/OccurrenceSearchParameter.html).
-
-> Note: if you don't have a predicate yet but you have a list of species or genus or family or any other taxa, you could use this [online lookup tool](https://www.gbif.org/tools/species-lookup) to get a list of GBIF ids. Then you could look at [the payload/predicate template](https://github.com/GuillaumeMougeot/gbifxdl/blob/main/examples/payload_template.json) and edit the list of values under the "TAXON_KEY" field.
 
 ### Step 1: Post your request to GBIF with GBIFXDL
 **For the first step, post your [GBIF predicate](https://techdocs.gbif.org/en/data-use/api-downloads) with the following command:**
@@ -214,6 +214,7 @@ Many thanks to anyone interested by this work.
 ## Acknowledgement
 
 This work has been inspired by the amazing works done in [gbif-dl](https://github.com/plantnet/gbif-dl/tree/master) and in [ami-ml](https://github.com/RolnickLab/ami-ml/tree/main/src/dataset_tools).
+
 
 
 
