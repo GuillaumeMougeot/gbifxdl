@@ -81,7 +81,7 @@ The package provides an Application Programming Interface (API) and a minimal Co
 
 This payload file request GBIF for all images (`StillImage`) of Nymphalidae (`7017`) and Tortricidae (`5343`) families. 
 
-> Note: in GBIF taxa are listed using their TAXON_KEY. For a specific taxon, you can find its taxon key, in the URL of this taxon on GBIF website. For example the URL of Tortricidae is [https://www.gbif.org/species/5343](https://www.gbif.org/species/5343). A quick and easy way to get taxon keys from scientific names is to upload a CSV list of species on the GBIF [online lookup tool](https://www.gbif.org/tools/species-lookup). 
+> Note: in GBIF taxa are listed using their TAXON_KEY. For a specific taxon, you can find its taxon key, in the URL of this taxon on GBIF website. For example the URL of Tortricidae is [https://www.gbif.org/species/5343](https://www.gbif.org/species/5343). A quick and easy way to get taxon keys from scientific names is to upload a CSV list of species on the GBIF [online lookup tool](https://www.gbif.org/tools/species-lookup). Another solution, for programmers is to use [GBIF Species API](https://techdocs.gbif.org/en/openapi/v1/species#/Searching%20names/matchNames).
 
 To use the above example:
 - Save it in a `choose_a_name.json` file
@@ -214,6 +214,7 @@ Many thanks to anyone interested by this work.
 ## Acknowledgement
 
 This work has been inspired by the amazing works done in [gbif-dl](https://github.com/plantnet/gbif-dl/tree/master) and in [ami-ml](https://github.com/RolnickLab/ami-ml/tree/main/src/dataset_tools).
+
 
 
 
