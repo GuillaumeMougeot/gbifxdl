@@ -209,11 +209,14 @@ Many thanks to anyone interested by this work.
 
 * [x] Integrate resizing in the pipeline.
 * [ ] Deep learning processing during postprocessing.
+* [ ] Export in Webdataset format.
 * [ ] CLI
+* [ ] GUI
  
 ## Acknowledgement
 
 This work has been inspired by the amazing works done in [gbif-dl](https://github.com/plantnet/gbif-dl/tree/master) and in [ami-ml](https://github.com/RolnickLab/ami-ml/tree/main/src/dataset_tools).
+
 
 
 
