@@ -3,7 +3,7 @@
 GBIF eXtreme downloader (gbifxdl) is a Python tool meant for scraping large 
 datasets of images using [GBIF](https://www.gbif.org/) website. 
 
-![](https://github.com/GuillaumeMougeot/gbifxdl/blob/main/docs/assets/gbifxdl_workflow.drawio.svg)
+![](https://github.com/GuillaumeMougeot/gbifxdl/blob/main/docs/assets/gbifxdl_workflow_wb.drawio.svg)
 
 gbifxdl is a two-steps process:
 * The first step takes as input a GBIF predicate (see [GBIF documentation](https://techdocs.gbif.org/en/data-use/api-downloads) and the exemple
@@ -216,6 +216,7 @@ Many thanks to anyone interested by this work.
 ## Acknowledgement
 
 This work has been inspired by the amazing works done in [gbif-dl](https://github.com/plantnet/gbif-dl/tree/master) and in [ami-ml](https://github.com/RolnickLab/ami-ml/tree/main/src/dataset_tools).
+
 
 
 
