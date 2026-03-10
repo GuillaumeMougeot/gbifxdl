@@ -1,11 +1,16 @@
 try:
     from flat_bug.predictor import Predictor
-except ImportError as e:
-    raise ImportError(
-        "flat-bug is not installed. "
-        "Image cropping functionality will be unavailable unless installed."
-        ) from e
-import torch
+    import torch
+    from typing import Union
+    FLAT_BUG_AVAILABLE = True
+    TorchTensor = torch.Tensor
+except ImportError:
+    FLAT_BUG_AVAILABLE = False
+    Predictor = None
+    torch = None
+    TorchTensor = None  # type: ignore
+    from typing import Any as TorchTensor  # Fallback type
+
 from PIL import Image
 import os
 from pathlib import Path
@@ -21,8 +26,17 @@ class Cropper:
         self,
         cropper_model_path,
         device="cpu",
-        dtype=torch.float16,
+        dtype=None,
     ):
+        if not FLAT_BUG_AVAILABLE:
+            raise ImportError(
+                "flat-bug is not installed. "
+                "Image cropping functionality with flat-bug is unavailable. "
+                "Install it with: pip install flat-bug"
+            )
+        
+        if dtype is None:
+            dtype = torch.float16
 
         # If the model is not locally, then attempts to download from remote
         if not os.path.exists(cropper_model_path):
@@ -37,13 +51,13 @@ class Cropper:
             cropper_model_path = wget.download(model_url, out=str(model_folder))
 
         self.cropper = Predictor(
-            model=cropper_model_path, device=device, dtype=torch.float16
+            model=cropper_model_path, device=device, dtype=dtype
         )
 
     def _change_ext(self, path, ext=".png"):
         return str(Path(path).with_suffix(ext))
 
-    def run(self, img_path) -> torch.Tensor:
+    def run(self, img_path) -> TorchTensor:
         with Image.open(img_path) as img:
             img_size = img.size
         scale_before = min(1, 1000 / min(img_size))

@@ -47,6 +47,18 @@ license = { text = "GPLv3" }
 gpu = [
     "torch",
 ]
+ocr = [
+    "pytesseract",
+]
+yolo = [
+    "ultralytics",
+    "huggingface_hub",
+]
+detection = [
+    "pytesseract",
+    "ultralytics",
+    "huggingface_hub",
+]
 
 [project.urls]
 "Homepage" = "https://github.com/GuillaumeMougeot/gbifxdl"

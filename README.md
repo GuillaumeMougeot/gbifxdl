@@ -42,6 +42,27 @@ pip install git+https://github.com/GuillaumeMougeot/gbifxdl.git
 * (Optional) Create a virtual environment with either `python -m venv venv-name` or `conda create -n venv-name`.
 * Run `pip install -e .` command (don't forget the `.` at the end of the command). 
 
+### Optional Features
+
+**OCR Text Detection:** To enable OCR-based text detection (for filtering images with labels/text):
+```bash
+pip install -e ".[ocr]"
+# Also requires tesseract-ocr system package:
+# Ubuntu/Debian: sudo apt-get install tesseract-ocr
+# macOS: brew install tesseract
+# Windows: Download from https://github.com/UB-Mannheim/tesseract/wiki
+```
+
+**YOLO Object Detection:** To enable YOLO-based object detection and cropping:
+```bash
+pip install -e ".[yolo]"
+```
+
+**All Detection Features:** To install both OCR and YOLO:
+```bash
+pip install -e ".[detection]"
+```
+
 ## Usage
 
 The package provides an Application Programming Interface (API) and a minimal Command Line Interface (CLI).
@@ -192,6 +213,118 @@ postprocess(
 The scripts above are used in practice in the [usecases folder](https://github.com/GuillaumeMougeot/gbifxdl/tree/main/usecases).
 
 For more detailed examples, look at the [examples folder](https://github.com/GuillaumeMougeot/gbifxdl/tree/main/examples).
+
+## Advanced Features
+
+### OCR Text Detection
+
+Filter out images containing text (labels, barcodes, etc.) during download:
+
+```python
+from gbifxdl import AsyncImagePipeline
+
+downloader = AsyncImagePipeline(
+    parquet_path=preprocessed_path,
+    output_dir=images_dir,
+    use_ocr=True,                    # Enable OCR detection
+    exclude_text_images=True,        # Exclude images with text
+    ocr_confidence=60.0,             # Confidence threshold (0-100)
+    ocr_min_text_length=3,          # Minimum text length to detect
+)
+```
+
+### YOLO Object Detection and Cropping
+
+Detect objects (e.g., arthropods) and crop images to focus on the specimen:
+
+```python
+from gbifxdl import AsyncImagePipeline
+
+downloader = AsyncImagePipeline(
+    parquet_path=preprocessed_path,
+    output_dir=images_dir,
+    use_yolo=True,                            # Enable YOLO detection
+    yolo_model_path="path/to/model.pt",      # Local model path
+    # OR load from Hugging Face:
+    # yolo_model_repo="username/model-repo",
+    # yolo_model_filename="model.pt",
+    yolo_device='cuda',                       # 'cpu', 'cuda', or 'cuda:0'
+    yolo_conf_threshold=0.25,                # Confidence threshold
+    yolo_padding=0.05,                       # Padding around detection
+)
+```
+
+### Post-Processing Detection
+
+Apply OCR/YOLO to already downloaded images:
+
+```python
+from gbifxdl.postprocess_detection import postprocess_with_detection
+
+postprocess_with_detection(
+    parquet_path="dataset/metadata.parquet",
+    img_dir="dataset/images",
+    use_ocr=True,
+    use_yolo=True,
+    yolo_model_path="path/to/model.pt",
+    yolo_device='cuda',
+    overwrite_images=True,  # Replace original images with cropped versions
+)
+```
+
+### Conditional One-Image-Per-Occurrence
+
+Download all images for rare species, but only one per occurrence for common species:
+
+```python
+from gbifxdl import preprocess_occurrences_stream
+
+preprocessed_path = preprocess_occurrences_stream(
+    dwca_path=download_path,
+    max_img_spc=2000,                    # Initial limit during preprocessing
+    one_media_per_occurrence=True,       # Download one image per occurrence
+    min_occurrence_threshold=50,         # But download ALL for species <50 occurrences
+)
+```
+
+**Important:** The `max_img_spc` parameter during preprocessing is a *soft limit* that filters URLs before download. To enforce a hard limit based on **actual downloaded images** (after OCR/YOLO filtering and download failures), use the `max_img_per_species` parameter in `postprocess()`:
+
+```python
+from gbifxdl import postprocess
+
+postprocess(
+    parquet_path=downloader.metadata_file,
+    img_dir=images_dir,
+    max_img_per_species=2000,  # Hard limit on successfully downloaded images
+)
+```
+
+This ensures you get exactly the desired number of images per species, accounting for:
+- Images excluded by OCR text detection
+- Images excluded due to no YOLO detection
+- Failed downloads
+- Corrupted images
+
+### Incremental Downloads (Skip Existing Images)
+
+Resume interrupted downloads or update datasets without re-downloading existing images (_WARNING: currently, this resuming feature is not compatible with YOLO detection and OCR filtering_):
+
+```python
+from gbifxdl import AsyncImagePipeline
+
+downloader = AsyncImagePipeline(
+    parquet_path=preprocessed_path,
+    output_dir=images_dir,
+    skip_existing=True,  # Skip images that already exist in output directory
+)
+```
+
+This is useful for:
+- Resuming interrupted downloads
+- Incrementally updating datasets with new observations
+- Avoiding bandwidth waste when re-running the pipeline
+
+Existing images are validated to ensure they're not corrupted - corrupted files are automatically re-downloaded.
 
 ## Contributing
 

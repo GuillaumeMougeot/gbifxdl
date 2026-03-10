@@ -6,7 +6,10 @@ import logging
 import os
 import posixpath
 import random
+import re
+import shutil
 import sys
+import tempfile
 import threading
 import time
 import zipfile
@@ -31,6 +34,7 @@ from aiohttp_retry import ExponentialRetry, RetryClient
 from asyncssh import SFTPClient, SFTPError
 from dwca.darwincore.utils import qualname as qn
 from dwca.read import DwCAReader
+from dwca.exceptions import InvalidArchive
 from omegaconf import OmegaConf
 from PIL import Image, UnidentifiedImageError
 from requests.auth import HTTPBasicAuth
@@ -70,7 +74,11 @@ __all__ = [
     "check_integrity_and_sync",
     "local_remove_empty_folders",
     "remote_remove_empty_folders",
+    "limit_images_per_species",
     "add_set_column",
+    "add_temporal_set_column",
+    "extract_year_from_eventdate",
+    "temporal_split_indices",
     "postprocess",
 ]
 
@@ -469,6 +477,77 @@ KEYS_GBIF = [
 ]
 
 
+def fix_malformed_dwca(dwca_path: Path) -> Path:
+    """Fix malformed Darwin Core Archive by removing problematic verbatim extension field.
+    
+    GBIF sometimes produces archives where the verbatim.txt extension has inconsistent
+    column counts (e.g., header has 194 columns but some data rows only have 193).
+    This function fixes the archive by modifying meta.xml to remove the last field
+    from the verbatim extension definition.
+    
+    Parameters
+    ----------
+    dwca_path : Path
+        Path to the Darwin Core Archive ZIP file.
+        
+    Returns
+    -------
+    Path
+        Path to the fixed archive (same as input, modified in place).
+    """
+    print(f"Attempting to fix malformed Darwin Core Archive: {dwca_path}")
+    
+    # Create a temporary directory for extraction
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        
+        # Extract the archive
+        with zipfile.ZipFile(dwca_path, 'r') as zip_ref:
+            zip_ref.extractall(temp_path)
+        
+        # Read the meta.xml file
+        meta_xml_path = temp_path / 'meta.xml'
+        if not meta_xml_path.exists():
+            raise FileNotFoundError(f"meta.xml not found in archive")
+        
+        with open(meta_xml_path, 'r', encoding='utf-8') as f:
+            meta_content = f.read()
+        
+        # Find and remove the last field (index=193) from the verbatim extension
+        # which ends with taxonRemarks
+        pattern = r'(<field index="193" term="http://rs\.tdwg\.org/dwc/terms/taxonRemarks"/>)\s*'
+        
+        if re.search(pattern, meta_content):
+            # Remove the problematic field
+            fixed_content = re.sub(pattern, '', meta_content)
+            
+            # Write the fixed meta.xml
+            with open(meta_xml_path, 'w', encoding='utf-8') as f:
+                f.write(fixed_content)
+            
+            print(f"✓ Fixed meta.xml: removed field index=193 (taxonRemarks) from verbatim extension")
+            
+            # Create a new ZIP file with the fixed meta.xml
+            backup_path = dwca_path.with_suffix('.zip.bak')
+            if not backup_path.exists():  # Only backup if not already backed up
+                shutil.copy2(dwca_path, backup_path)
+                print(f"✓ Backed up original to: {backup_path}")
+            else:
+                print(f"✓ Using existing backup: {backup_path}")
+            
+            with zipfile.ZipFile(dwca_path, 'w', zipfile.ZIP_DEFLATED) as zip_out:
+                for file_path in temp_path.rglob('*'):
+                    if file_path.is_file():
+                        arcname = file_path.relative_to(temp_path)
+                        zip_out.write(file_path, arcname)
+            
+            print(f"✓ Created fixed archive: {dwca_path}")
+        else:
+            print(f"⚠ Could not find problematic field in meta.xml (may already be fixed)")
+    
+    return dwca_path
+
+
 def preprocess_occurrences(
     occurrences_path: Path,
     file_format: str = "dwca",
@@ -501,6 +580,30 @@ def preprocess_occurrences(
 
     print("Preprocessing the occurrence file before download...")
     if file_format.lower() == "dwca":
+        # Check if extensions are accessible before processing
+        extensions_broken = False
+        with DwCAReader(occurrences_path) as dwca:
+            test_row = next(iter(dwca), None)
+            if test_row:
+                try:
+                    _ = list(test_row.extensions)
+                except (InvalidArchive, IndexError) as e:
+                    extensions_broken = True
+                    print(f"\n⚠ WARNING: Darwin Core Archive has malformed extension files!")
+                    print(f"Details: {e}")
+        
+        if extensions_broken:
+            # Try to fix the archive automatically
+            try:
+                occurrences_path = fix_malformed_dwca(occurrences_path)
+                print(f"✓ Archive fixed! Retrying processing...\n")
+            except Exception as fix_error:
+                print(f"✗ Failed to fix archive: {fix_error}")
+                raise RuntimeError(
+                    f"Cannot process malformed Darwin Core Archive. "
+                    f"Please delete {occurrences_path} and download fresh data from GBIF."
+                )
+        
         with DwCAReader(occurrences_path) as dwca:
             images_metadata = {}
 
@@ -582,6 +685,7 @@ def preprocess_occurrences_stream(
     chunk_size: int = 10000,
     mediatype: str = "StillImage",
     one_media_per_occurrence: bool = True,
+    min_occurrence_threshold: Optional[int] = None,
     delete: Optional[bool] = False,
     log_mem: Optional[bool] = False,
     strict: Optional[bool] = False,
@@ -605,7 +709,13 @@ def preprocess_occurrences_stream(
     mediatype : str, default='StillImage'
         Type of media to extract.
     one_media_per_occurrence : bool, default=True
-        Whether to limit to one media file per occurrence.
+        Whether to limit to one media file per occurrence. Can be overridden
+        by min_occurrence_threshold parameter.
+    min_occurrence_threshold : int, default=None
+        If set, species with fewer occurrences than this threshold will have
+        all their media downloaded (ignoring one_media_per_occurrence), while
+        species with more occurrences will follow the one_media_per_occurrence
+        setting. This is useful to maximize data collection for rare species.
     delete : bool, default=False
         Whether to delete the DWCA file after processing.
     log_mem : bool, default=False
@@ -663,6 +773,54 @@ def preprocess_occurrences_stream(
     mmqualname = "http://purl.org/dc/terms/"
     gbifqualname = "http://rs.gbif.org/terms/1.0/"
 
+    # First pass: count occurrences per species if min_occurrence_threshold is set
+    species_occurrence_counts = defaultdict(int)
+    if min_occurrence_threshold is not None:
+        print(f"First pass: counting occurrences per species for threshold={min_occurrence_threshold}...")
+        with DwCAReader(dwca_path) as dwca:
+            for row in dwca:
+                taxon_key = row.data.get(gbifqualname + "taxonKey")
+                if taxon_key:
+                    species_occurrence_counts[taxon_key] += 1
+        print(f"Found {len(species_occurrence_counts)} species. Starting main processing...")
+
+    # Check if extensions are accessible (test on first row)
+    extensions_broken = False
+    with DwCAReader(dwca_path) as dwca:
+        test_row = next(iter(dwca), None)
+        if test_row:
+            try:
+                # Try to access extensions - this triggers coreid_index building
+                _ = list(test_row.extensions)
+            except (InvalidArchive, IndexError) as e:
+                extensions_broken = True
+                error_msg = str(e)
+                print(f"\n⚠ WARNING: Darwin Core Archive has malformed extension files!")
+                print(f"Details: {error_msg}")
+    
+    if extensions_broken:
+        # Try to fix the archive automatically
+        try:
+            dwca_path = fix_malformed_dwca(dwca_path)
+            print(f"✓ Archive fixed! Retrying processing...\n")
+            # Verify the fix worked
+            with DwCAReader(dwca_path) as dwca:
+                test_row = next(iter(dwca), None)
+                if test_row:
+                    try:
+                        _ = list(test_row.extensions)
+                        extensions_broken = False
+                    except (InvalidArchive, IndexError) as e:
+                        extensions_broken = True
+        except Exception as fix_error:
+            print(f"✗ Failed to fix archive: {fix_error}")
+    
+    if extensions_broken:
+        raise RuntimeError(
+            f"Cannot process malformed Darwin Core Archive even after attempted fix. "
+            f"Please delete {dwca_path} and download fresh data from GBIF."
+        )
+    
     with DwCAReader(dwca_path) as dwca:
         for row in dwca:
             img_extensions = []
@@ -671,9 +829,19 @@ def preprocess_occurrences_stream(
                     and ext.data[mmqualname + "type"] == mediatype):
                     img_extensions.append(ext.data)
 
+            # Determine if we should take one or all media for this occurrence
+            taxon_key_for_threshold = row.data.get(gbifqualname + "taxonKey")
+            should_take_one_media = one_media_per_occurrence
+            
+            # Override if min_occurrence_threshold is set and species is below threshold
+            if min_occurrence_threshold is not None and taxon_key_for_threshold:
+                species_occ_count = species_occurrence_counts.get(taxon_key_for_threshold, 0)
+                if species_occ_count < min_occurrence_threshold:
+                    should_take_one_media = False  # Take all media for rare species
+
             media = (
                 [random.choice(img_extensions)]
-                if one_media_per_occurrence
+                if should_take_one_media and img_extensions
                 else img_extensions
             )
 
@@ -863,6 +1031,22 @@ class AsyncImagePipeline:
         gpu_image_processor=None,
         resize: int=None, # Whether to resize the image during processing
         save2jpg: bool=False, # Whether to save the image in jpg format
+        skip_existing: bool = False, # Skip downloading if image already exists
+        # OCR parameters
+        use_ocr: bool = False,
+        exclude_text_images: bool = True,
+        ocr_confidence: float = 60.0,
+        ocr_min_text_length: int = 3,
+        # YOLO detection parameters
+        use_yolo: bool = False,
+        yolo_model_path: Optional[str] = None,
+        yolo_model_repo: Optional[str] = None,
+        yolo_model_filename: Optional[str] = None,
+        yolo_device: str = 'cpu',
+        yolo_batch_size: int = 32,
+        yolo_conf_threshold: float = 0.25,
+        yolo_padding: float = 0.05,
+        yolo_require_detection: bool = False,  # Exclude images where YOLO detects nothing
     ):
         self.parquet_path = Path(parquet_path)
         self.parquet_file = pq.ParquetFile(self.parquet_path)
@@ -875,6 +1059,7 @@ class AsyncImagePipeline:
         self.max_concurrent_download = max_concurrent_download
         self.max_concurrent_processing = max_concurrent_processing
         self.do_upload = sftp_params is not None
+        self.skip_existing = skip_existing
 
         # Queues for managing pipeline stages
         self.download_queue = asyncio.Queue(maxsize=max_queue_size)
@@ -906,10 +1091,19 @@ class AsyncImagePipeline:
             self.logger = logger
 
         self.download_progress_bar = None
-        self.download_stats = {"failed": 0, "success": 0}
+        self.download_stats = {"failed": 0, "success": 0, "skipped": 0}
         if self.do_upload:
             self.upload_progress_bar = None
             self.upload_stats = {"failed": 0, "success": 0}
+        
+        # Processing statistics for OCR/YOLO
+        self.processing_stats = {
+            "ocr_text_detected": 0,
+            "ocr_excluded": 0,
+            "yolo_detected": 0,
+            "yolo_not_detected": 0,
+            "yolo_excluded": 0,
+        }
 
         # Storing of processing metadata
         self.metadata_writer = None
@@ -946,6 +1140,51 @@ class AsyncImagePipeline:
             self.remote_dir = remote_dir
             # self.remove_remote_dir = remove_remote_dir
             self.max_concurrent_upload = max_concurrent_upload
+
+        # OCR and YOLO setup
+        self.use_ocr = use_ocr
+        self.exclude_text_images = exclude_text_images
+        self.use_yolo = use_yolo
+        self.yolo_batch_size = yolo_batch_size
+        self.yolo_padding = yolo_padding
+        self.yolo_require_detection = yolo_require_detection
+        
+        # Batch buffers for YOLO processing
+        self.yolo_batch_buffer = []
+        self.yolo_batch_lock = asyncio.Lock()
+        
+        # Initialize OCR detector if needed
+        self.ocr_detector = None
+        if self.use_ocr:
+            try:
+                from .ocr_detector import OCRDetector
+                self.ocr_detector = OCRDetector(
+                    confidence_threshold=ocr_confidence,
+                    min_text_length=ocr_min_text_length,
+                    logger=self.logger
+                )
+                self.logger.info("OCR detector initialized successfully")
+            except Exception as e:
+                self.logger.error(f"Failed to initialize OCR detector: {e}")
+                self.use_ocr = False
+        
+        # Initialize YOLO detector if needed
+        self.yolo_detector = None
+        if self.use_yolo:
+            try:
+                from .yolo_detector import YOLODetector
+                self.yolo_detector = YOLODetector(
+                    model_path=yolo_model_path,
+                    model_repo=yolo_model_repo,
+                    model_filename=yolo_model_filename,
+                    device=yolo_device,
+                    conf_threshold=yolo_conf_threshold,
+                    logger=self.logger
+                )
+                self.logger.info(f"YOLO detector initialized successfully on {yolo_device}")
+            except Exception as e:
+                self.logger.error(f"Failed to initialize YOLO detector: {e}")
+                self.use_yolo = False
 
         # TODO: make this conditional
         self.devices = ["cpu"]
@@ -1075,11 +1314,34 @@ class AsyncImagePipeline:
         form: str,
         folder: str,
         _num_attempts: int = 0
-    ) -> bool:
+    ) -> tuple:
         """
         Downloads a single image and saves it to the output directory.
+        Skips download if file already exists and skip_existing is True.
+        
+        Returns:
+            tuple: (filename, was_skipped) where filename is str or None, 
+                   and was_skipped is True if file was skipped
         """
         try:
+            # Determine expected file path
+            ext = "." + form.split("/")[1] if form in VALID_IMAGE_FORMAT else ".jpg"
+            filename = url_hash + ext
+            full_path = os.path.join(self.output_dir, folder, filename)
+            
+            # Check if file already exists and skip if requested
+            if self.skip_existing and os.path.exists(full_path):
+                # Verify it's a valid image
+                try:
+                    with Image.open(full_path) as img:
+                        img.verify()
+                    self.logger.debug(f"Skipping existing file: {full_path}")
+                    return (filename, True)  # Return filename and skipped=True
+                except Exception:
+                    # File exists but is corrupted, download again
+                    self.logger.debug(f"Existing file corrupted, re-downloading: {full_path}")
+                    pass
+            
             async with self.download_semaphore:
                 async with session.get(url) as response:
                     response.raise_for_status()
@@ -1128,11 +1390,11 @@ class AsyncImagePipeline:
                 )
 
             self.logger.debug(f"Downloaded: {url}")
-            return filename
+            return (filename, False)  # Return filename and skipped=False
 
         except Exception as e:
             self.logger.error(f"Error downloading {url}: {e}")
-            return None
+            return (None, False)  # Return None and skipped=False for failures
 
     def compute_hash_and_dimensions(self, img_path, resize:int=None):
         """Calculate hash and dimensions of an image."""
@@ -1208,11 +1470,11 @@ class AsyncImagePipeline:
             return str(img_path.name)
 
     def process_image(self, filename: str, folder: str, thread_id=None) -> bool:
-        """Crop the image, hash the image, get image size, ..."""
+        """Crop the image, hash the image, get image size, apply OCR and YOLO if enabled."""
         try:
             img_path = os.path.join(self.output_dir, folder, filename)
 
-            # Crop image
+            # Crop image with original processor if available
             if self.gpu_image_processor is not None and thread_id is not None:
                 new_filename = self.get_model(thread_id).run(img_path)
                 if new_filename is not None:
@@ -1223,13 +1485,127 @@ class AsyncImagePipeline:
                     filename = new_filename
                     img_path = os.path.join(self.output_dir, folder, filename)
 
-            # img_hash, img_size = self.compute_hash_and_dimensions(img_path, resize=self.resize)
+            # Load image for processing
             with Image.open(img_path) as img:
-                img=self.resize_img(img, resize=self.resize)
-                img_size=self.get_img_size(img)
-                img_hash=self.get_img_hash(img)
+                # Initialize metadata for OCR and YOLO
+                ocr_metadata = {}
+                yolo_metadata = {}
+                should_exclude = False
+                exclusion_reason = ""
+                
+                # Apply OCR if enabled
+                if self.use_ocr and self.ocr_detector is not None:
+                    ocr_result = self.ocr_detector.detect_text(img)
+                    ocr_metadata = {
+                        'has_text': ocr_result.get('has_text', False),
+                        'text_confidence': ocr_result.get('text_confidence', 0.0),
+                        'num_words': ocr_result.get('num_words', 0),
+                    }
+                    
+                    # Track OCR statistics
+                    if ocr_result.get('has_text', False):
+                        self.processing_stats["ocr_text_detected"] += 1
+                    
+                    # Check if image should be excluded based on text
+                    if self.exclude_text_images and ocr_result.get('has_text', False):
+                        should_exclude = True
+                        exclusion_reason = "excluded_text_detected"
+                        self.processing_stats["ocr_excluded"] += 1
+                        self.logger.debug(f"Excluding {filename} due to text detection")
+                
+                # Apply YOLO detection and cropping if enabled and image not excluded
+                if self.use_yolo and self.yolo_detector is not None and not should_exclude:
+                    detection = self.yolo_detector.detect(img)
+                    
+                    if detection.get('detected', False):
+                        self.processing_stats["yolo_detected"] += 1
+                        
+                        # Crop to best bounding box
+                        x1, y1, x2, y2 = detection['best_box']
+                        width = x2 - x1
+                        height = y2 - y1
+                        
+                        # Add padding
+                        pad_x = width * self.yolo_padding
+                        pad_y = height * self.yolo_padding
+                        
+                        x1 = max(0, x1 - pad_x)
+                        y1 = max(0, y1 - pad_y)
+                        x2 = min(img.width, x2 + pad_x)
+                        y2 = min(img.height, y2 + pad_y)
+                        
+                        # Crop the image in memory
+                        cropped_img = img.crop((int(x1), int(y1), int(x2), int(y2)))
+                        
+                        yolo_metadata = {
+                            'yolo_detected': True,
+                            'yolo_confidence': detection.get('best_conf', 0.0),
+                            'yolo_class': detection.get('best_class', -1),
+                            'yolo_bbox': detection['best_box'],
+                        }
+                    else:
+                        self.processing_stats["yolo_not_detected"] += 1
+                        cropped_img = None
+                        
+                        yolo_metadata = {
+                            'yolo_detected': False,
+                            'yolo_confidence': 0.0,
+                            'yolo_class': -1,
+                        }
+                        
+                        # Check if image should be excluded when no detection
+                        if self.yolo_require_detection:
+                            should_exclude = True
+                            exclusion_reason = "excluded_no_detection"
+                            self.processing_stats["yolo_excluded"] += 1
+                            self.logger.debug(f"Excluding {filename} due to no YOLO detection")
+                
+                # If image should be excluded, don't process further
+                if should_exclude:
+                    # Close the image before deleting
+                    pass  # Image will be closed when exiting the with block
+            
+            # Save the cropped image if YOLO detected something
+            # Must save before the exclusion check so the cropped image replaces the original
+            if self.use_yolo and self.yolo_detector is not None and not should_exclude:
+                if 'cropped_img' in locals() and cropped_img is not None:
+                    # Save the cropped image, replacing the original
+                    cropped_img.save(img_path)
+                    self.logger.debug(f"Saved cropped image for {filename}")
+            
+            # If image should be excluded, remove it and return
+            if should_exclude:
+                # Delete the image file
+                if os.path.exists(img_path):
+                    os.remove(img_path)
+                
+                # Also delete JPG version if it exists (in case it was created earlier)
+                jpg_path = Path(img_path).with_suffix('.jpg')
+                if jpg_path.exists() and jpg_path != Path(img_path):
+                    os.remove(jpg_path)
+                
+                metadata = {
+                    "filename": "",
+                    "img_hash": "",
+                    "width": 0,
+                    "height": 0,
+                    "status": exclusion_reason,
+                    "done": True,
+                    **ocr_metadata,
+                    **yolo_metadata,
+                }
+                return None, metadata
+            
+            # Process the image (resize, hash, save)
+            with Image.open(img_path) as img:
+                # Resize and get hash
+                img = self.resize_img(img, resize=self.resize)
+                img_size = self.get_img_size(img)
+                img_hash = self.get_img_hash(img)
+                
+                # Save to JPG if needed
                 if self.save2jpg:
-                    filename=self.encode_img_to_jpg(img, img_path)
+                    filename = self.encode_img_to_jpg(img, img_path)
 
             # Add metadata to buffer
             width, height = img_size[0], img_size[1]
@@ -1240,6 +1616,8 @@ class AsyncImagePipeline:
                 "width": width,
                 "height": height,
                 "status": "processing_success",
+                **ocr_metadata,
+                **yolo_metadata,
             }
 
             return filename, metadata
@@ -1330,10 +1708,15 @@ class AsyncImagePipeline:
 
             url, url_hash, form, folder = item
             try:
-                filename = await self.download_image(session, url, url_hash, form, folder)
+                result = await self.download_image(session, url, url_hash, form, folder)
+                filename, was_skipped = result
+                
                 if filename is not None:
                     await self.processing_queue.put((url_hash, filename, folder))
-                    self.download_stats["success"] += 1
+                    if was_skipped:
+                        self.download_stats["skipped"] += 1
+                    else:
+                        self.download_stats["success"] += 1
                     async with self.metadata_lock:
                         self._update_metadata(url_hash, status="downloading_success")
                 else:
@@ -1361,9 +1744,14 @@ class AsyncImagePipeline:
                     self._update_metadata(url_hash=url_hash, **metadata)
 
                 if filename is None:
-                    async with self.metadata_lock:
-                        self._update_metadata(
-                            url_hash, status="processing_failed", done=True)
+                    # Only mark as failed if not already marked with an exclusion status
+                    if metadata.get('status', '').startswith('excluded_'):
+                        # Already has exclusion status and done=True, don't overwrite
+                        pass
+                    else:
+                        async with self.metadata_lock:
+                            self._update_metadata(
+                                url_hash, status="processing_failed", done=True)
                 elif self.do_upload:
                     async with self.metadata_lock:
                         self._update_metadata(
@@ -1528,6 +1916,33 @@ class AsyncImagePipeline:
             self.metadata_writer.close()
 
         self.logger.info("Pipeline completed.")
+        
+        # Print summary statistics
+        print("\n" + "="*70)
+        print("DOWNLOAD AND PROCESSING SUMMARY")
+        print("="*70)
+        print(f"Download statistics:")
+        print(f"  - Successful downloads: {self.download_stats['success']}")
+        print(f"  - Skipped (already exist): {self.download_stats['skipped']}")
+        print(f"  - Failed downloads: {self.download_stats['failed']}")
+        
+        if self.use_ocr:
+            print(f"\nOCR Text Detection statistics:")
+            print(f"  - Images with text detected: {self.processing_stats['ocr_text_detected']}")
+            if self.exclude_text_images:
+                print(f"  - Images excluded (text): {self.processing_stats['ocr_excluded']}")
+        
+        if self.use_yolo:
+            print(f"\nYOLO Object Detection statistics:")
+            print(f"  - Objects detected and cropped: {self.processing_stats['yolo_detected']}")
+            print(f"  - No detection (kept original): {self.processing_stats['yolo_not_detected']}")
+        
+        if self.do_upload:
+            print(f"\nUpload statistics:")
+            print(f"  - Successful uploads: {self.upload_stats['success']}")
+            print(f"  - Failed uploads: {self.upload_stats['failed']}")
+        
+        print("="*70 + "\n")
 
     async def pipeline(self):
         if self.do_upload:
@@ -1899,6 +2314,187 @@ def balanced_list(n: int, p: int, dtype: type = int, start: int = 0):
     return l
 
 
+def limit_images_per_species(
+    parquet_path,
+    img_dir,
+    batch_size=1000,
+    max_img_per_species=None,
+    species_column="speciesKey",
+    filename_column="filename",
+    status_column="status",
+    dry_run=False,
+    suffix="_limited",
+    out_path=None,
+    sftp_params=None,
+    seed=42,
+):
+    """
+    Limit the number of successfully downloaded images per species.
+    
+    This function enforces max_img_per_species based on ACTUAL downloaded images,
+    after all filtering (OCR, YOLO, download failures, etc.) has occurred.
+    
+    Images are randomly selected when a species exceeds the limit to ensure fairness.
+    Excess images and their parquet rows are removed.
+    
+    Parameters
+    ----------
+    parquet_path : str or Path
+        Path to the parquet metadata file
+    img_dir : str
+        Directory containing downloaded images
+    batch_size : int, default=1000
+        Batch size for processing parquet file
+    max_img_per_species : int, optional
+        Maximum images to keep per species. If None, no limit is applied.
+    species_column : str, default="speciesKey"
+        Column name for species identifier
+    filename_column : str, default="filename"
+        Column name for image filenames
+    status_column : str, default="status"
+        Column name for download status
+    dry_run : bool, default=False
+        If True, only report what would be removed without deleting
+    suffix : str, default="_limited"
+        Suffix to add to output parquet filename
+    out_path : str or Path, optional
+        Custom output path. If None, uses input path with suffix.
+    sftp_params : dict, optional
+        SFTP parameters for remote file operations
+    seed : int, default=42
+        Random seed for reproducible selection when limiting
+        
+    Returns
+    -------
+    Path
+        Path to the output parquet file
+    """
+    if max_img_per_species is None:
+        print("No max_img_per_species specified, skipping limit enforcement.")
+        return parquet_path
+    
+    print(f"Limiting to max {max_img_per_species} images per species based on successfully downloaded images...")
+    
+    assert isinstance(parquet_path, (Path, str)), f"Error: parquet_path has wrong type {type(parquet_path)}"
+    if isinstance(parquet_path, str):
+        parquet_path = Path(parquet_path)
+    
+    parquet_file = pq.ParquetFile(parquet_path)
+    np.random.seed(seed)
+    
+    # First pass: Count successful downloads per species
+    species_counts = defaultdict(int)
+    species_rows = defaultdict(list)  # Track row indices for each species
+    
+    row_idx = 0
+    for batch in parquet_file.iter_batches(batch_size=batch_size):
+        batch_df = batch.to_pandas()
+        for i, row in batch_df.iterrows():
+            # Only count successfully processed images
+            if status_column in batch_df.columns:
+                status = row[status_column]
+                if "success" not in status:
+                    row_idx += 1
+                    continue
+            
+            species = row[species_column]
+            species_counts[species] += 1
+            species_rows[species].append(row_idx)
+            row_idx += 1
+    
+    # Determine which rows to keep
+    rows_to_remove = set()
+    species_over_limit = 0
+    total_removed = 0
+    
+    for species, count in species_counts.items():
+        if count > max_img_per_species:
+            species_over_limit += 1
+            # Randomly select which rows to keep
+            rows_for_species = species_rows[species]
+            np.random.shuffle(rows_for_species)
+            # Mark excess rows for removal
+            to_remove = rows_for_species[max_img_per_species:]
+            rows_to_remove.update(to_remove)
+            total_removed += len(to_remove)
+    
+    if not rows_to_remove:
+        print("No species exceed the limit. No filtering needed.")
+        return parquet_path
+    
+    print(f"Found {species_over_limit} species exceeding limit of {max_img_per_species}")
+    print(f"Will remove {total_removed} images to enforce limit")
+    
+    if dry_run:
+        print("DRY RUN: No files will be deleted")
+        return parquet_path
+    
+    # Second pass: Write filtered parquet and collect files to delete
+    if out_path is None:
+        out_path = parquet_path.with_stem(parquet_path.stem + suffix)
+    
+    writer = None
+    files_to_delete = []
+    row_idx = 0
+    
+    for batch in parquet_file.iter_batches(batch_size=batch_size):
+        batch_df = batch.to_pandas()
+        
+        # Filter out rows marked for removal
+        batch_indices_to_keep = []
+        for i, row in batch_df.iterrows():
+            if row_idx not in rows_to_remove:
+                batch_indices_to_keep.append(i)
+            else:
+                # Collect filename for deletion
+                if filename_column in batch_df.columns:
+                    filename = row[filename_column]
+                    species_folder = row[species_column]
+                    files_to_delete.append((filename, species_folder))
+            row_idx += 1
+        
+        if batch_indices_to_keep:
+            filtered_df = batch_df.iloc[batch_indices_to_keep]
+            filtered_table = pa.Table.from_pandas(filtered_df)
+            
+            if writer is None:
+                writer = pq.ParquetWriter(out_path, filtered_table.schema)
+            
+            writer.write_table(filtered_table)
+    
+    if writer:
+        writer.close()
+    
+    # Delete excess image files
+    if files_to_delete:
+        print(f"Deleting {len(files_to_delete)} excess image files...")
+        if sftp_params is None:
+            # Local deletion
+            for filename, species_folder in files_to_delete:
+                file_path = os.path.join(img_dir, str(species_folder), filename)
+                try:
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                except Exception as e:
+                    print(f"Warning: Failed to delete {file_path}: {e}")
+        else:
+            # Remote deletion
+            async def delete_remote_files():
+                async with asyncssh.connect(**sftp_params) as conn:
+                    async with conn.start_sftp_client() as sftp:
+                        for filename, species_folder in files_to_delete:
+                            remote_path = f"{img_dir}/{species_folder}/{filename}"
+                            try:
+                                await sftp.remove(remote_path)
+                            except Exception as e:
+                                print(f"Warning: Failed to delete {remote_path}: {e}")
+            
+            asyncio.run(delete_remote_files())
+    
+    print(f"Successfully limited images per species. Output: {out_path}")
+    return out_path
+
+
 def add_set_column(
     parquet_path,
     batch_size=1000,
@@ -1958,6 +2554,232 @@ def add_set_column(
 
     return out_path
 
+
+def extract_year_from_eventdate(eventdate_str):
+    """Extract year from GBIF eventDate string.
+    
+    Args:
+        eventdate_str: Date string in various formats (e.g., "2023", "2023-01-15", "2023-01-15T10:30:00")
+    
+    Returns:
+        Year as integer, or None if cannot be extracted
+    """
+    if eventdate_str is None or (isinstance(eventdate_str, str) and len(eventdate_str.strip()) == 0):
+        return None
+    
+    try:
+        # Convert to string if not already
+        date_str = str(eventdate_str).strip()
+        
+        # Extract first 4 digits that look like a year
+        year_match = re.match(r'^(\d{4})', date_str)
+        if year_match:
+            year = int(year_match.group(1))
+            # Sanity check: year should be reasonable (e.g., 1700-2100)
+            if 1700 <= year <= 2100:
+                return year
+        return None
+    except (ValueError, AttributeError):
+        return None
+
+
+def temporal_split_indices(years, split_ratios=[0.7, 0.2, 0.1]):
+    """Split indices based on temporal order (oldest to newest).
+    
+    Args:
+        years: List of years (can contain None for unknown dates)
+        split_ratios: Ratios for [train, val, test]. Must sum to 1.0
+    
+    Returns:
+        List of set labels: "train", "val", or "test"
+    """
+    if not np.isclose(sum(split_ratios), 1.0):
+        raise ValueError(f"split_ratios must sum to 1.0, got {sum(split_ratios)}")
+    
+    n = len(years)
+    
+    # Separate indices with known vs unknown years
+    indices_with_year = []
+    indices_without_year = []
+    
+    for i, year in enumerate(years):
+        if year is None:
+            indices_without_year.append(i)
+        else:
+            indices_with_year.append(i)
+    
+    # Initialize all as train (for unknown dates)
+    result = ["train"] * n
+    
+    if len(indices_with_year) == 0:
+        # All dates unknown, assign to train
+        return result
+    
+    # Sort indices by year (oldest to newest)
+    sorted_indices = sorted(indices_with_year, key=lambda i: years[i])
+    
+    # Calculate split points
+    n_with_year = len(sorted_indices)
+    train_end = int(n_with_year * split_ratios[0])
+    val_end = train_end + int(n_with_year * split_ratios[1])
+    
+    # Assign sets based on temporal order
+    for idx, original_idx in enumerate(sorted_indices):
+        if idx < train_end:
+            result[original_idx] = "train"
+        elif idx < val_end:
+            result[original_idx] = "val"
+        else:
+            result[original_idx] = "test"
+    
+    return result
+
+
+def add_temporal_set_column(
+    parquet_path,
+    batch_size=1000,
+    split_ratios=[0.8, 0.1, 0.1],
+    ood_th=5,
+    species_column="speciesKey",
+    eventdate_column="eventDate",
+    seed=42,
+    out_path=None,
+    suffix="_temporal_set"):
+    """Add a 'set' column with temporal train/val/test split while preserving OOD logic.
+    
+    Args:
+        parquet_path: Path to the parquet file
+        batch_size: Batch size for processing
+        split_ratios: List of [train_ratio, val_ratio, test_ratio]. Must sum to 1.0.
+                      Default is [0.8, 0.1, 0.1] for 80% train, 10% val, 10% test.
+        ood_th: Out-of-distribution threshold. Species with <= ood_th images go to "test_ood"
+        species_column: Column name containing species identifier
+        eventdate_column: Column name containing event date (e.g., "eventDate")
+        seed: Random seed for reproducibility
+        out_path: Output path for parquet file (optional)
+        suffix: Suffix to add to output filename if out_path not provided
+    
+    Returns:
+        Path to output parquet file
+        
+    Notes:
+        - Species with <= ood_th images are assigned to "test_ood" (preserves OOD testing)
+        - For in-distribution species (> ood_th images):
+          * Samples are sorted by year extracted from eventDate
+          * Oldest samples → train
+          * Middle samples → val  
+          * Newest samples → test
+          * Samples with unknown/missing dates → train
+        - Split is done per-species to preserve class balance
+    """
+    assert isinstance(parquet_path, (Path, str)), f"Error: parquet_path has a wrong type {type(parquet_path)}"
+    if isinstance(parquet_path, str): 
+        parquet_path = Path(parquet_path)
+    
+    if not np.isclose(sum(split_ratios), 1.0):
+        raise ValueError(f"split_ratios must sum to 1.0, got {sum(split_ratios)}")
+    
+    parquet_file = pq.ParquetFile(parquet_path)
+
+    # Set random seed
+    np.random.seed(seed=seed)
+
+    # First pass: Count images per species and collect years for each species
+    species_count = defaultdict(int)
+    species_years = defaultdict(list)  # Store (batch_idx, row_idx, year) tuples
+    
+    batch_idx = 0
+    for batch in parquet_file.iter_batches(batch_size=batch_size):
+        species_list = batch[species_column].to_pylist()
+        
+        # Try to get eventDate column, handle if it doesn't exist
+        try:
+            eventdate_list = batch[eventdate_column].to_pylist()
+        except KeyError:
+            print(f"Warning: Column '{eventdate_column}' not found. All dates will be treated as unknown.")
+            eventdate_list = [None] * len(species_list)
+        
+        for row_idx, (species, eventdate) in enumerate(zip(species_list, eventdate_list)):
+            species_count[species] += 1
+            year = extract_year_from_eventdate(eventdate)
+            species_years[species].append((batch_idx, row_idx, year))
+        
+        batch_idx += 1
+    
+    # Compute temporal splits for each in-distribution species
+    species_assignments = {}
+    
+    for species, year_data in species_years.items():
+        if species_count[species] <= ood_th:
+            # OOD species: all samples go to test_ood
+            species_assignments[species] = ["test_ood"] * len(year_data)
+        else:
+            # In-distribution species: temporal split
+            years = [y for _, _, y in year_data]
+            assignments = temporal_split_indices(years, split_ratios)
+            species_assignments[species] = assignments
+    
+    # Second pass: Write output with set column
+    writer = None
+    if out_path is None:
+        out_path = parquet_path.with_stem(parquet_path.stem + suffix)
+    
+    # Create a mapping from (batch_idx, row_idx) to set assignment
+    assignment_map = {}
+    for species, year_data in species_years.items():
+        assignments = species_assignments[species]
+        for (b_idx, r_idx, _), assignment in zip(year_data, assignments):
+            assignment_map[(b_idx, r_idx)] = assignment
+    
+    batch_idx = 0
+    for batch in parquet_file.iter_batches(batch_size=batch_size):
+        batch_table = pa.table(batch)
+        
+        # Create set column for this batch
+        set_column = []
+        for row_idx in range(len(batch)):
+            set_value = assignment_map.get((batch_idx, row_idx), "train")
+            set_column.append(set_value)
+        
+        # Append column to table
+        batch_table = batch_table.append_column("set", [set_column])
+        
+        if writer is None:
+            writer = pq.ParquetWriter(out_path, batch_table.schema)
+        
+        writer.write_table(batch_table)
+        batch_idx += 1
+    
+    if writer:
+        writer.close()
+    
+    # Calculate date metadata statistics
+    total_samples = sum(len(year_data) for year_data in species_years.values())
+    samples_with_date = sum(1 for year_data in species_years.values() for _, _, year in year_data if year is not None)
+    samples_without_date = total_samples - samples_with_date
+    
+    # Print statistics
+    set_counts = defaultdict(int)
+    for assignments in species_assignments.values():
+        for assignment in assignments:
+            set_counts[assignment] += 1
+    
+    print(f"Dataset split statistics:")
+    print(f"  train: {set_counts['train']} samples ({100*set_counts['train']/sum(set_counts.values()):.1f}%)")
+    print(f"  val:   {set_counts['val']} samples ({100*set_counts['val']/sum(set_counts.values()):.1f}%)")
+    print(f"  test:  {set_counts['test']} samples ({100*set_counts['test']/sum(set_counts.values()):.1f}%)")
+    if set_counts['test_ood'] > 0:
+        print(f"  test_ood: {set_counts['test_ood']} samples ({100*set_counts['test_ood']/sum(set_counts.values()):.1f}%)")
+    print(f"Total species: {len(species_count)}")
+    print(f"  In-distribution species (>{ood_th} images): {sum(1 for c in species_count.values() if c > ood_th)}")
+    print(f"  OOD species (<={ood_th} images): {sum(1 for c in species_count.values() if c <= ood_th)}")
+    print(f"\\nDate metadata coverage:")
+    print(f"  Images with date: {samples_with_date} ({100*samples_with_date/total_samples:.1f}%)")
+    print(f"  Images without date: {samples_without_date} ({100*samples_without_date/total_samples:.1f}%)")
+
+    return out_path
+
+
 def add_set_column_df(
     df,
     n_split=5,
@@ -2010,6 +2832,7 @@ def postprocess(
     img_hash_column="img_hash",
     filename_column="filename",
     species_column="speciesKey",
+    max_img_per_species=None,
     n_split=5,
     ood_th=5,
     dry_run=False,
@@ -2017,6 +2840,47 @@ def postprocess(
     suffix="_postprocessed",
     sftp_params=None,
     ):
+    """
+    Postprocess downloaded images: remove failures, duplicates, enforce limits, and create train/test splits.
+    
+    Parameters
+    ----------
+    parquet_path : str or Path
+        Path to the parquet metadata file from image download
+    img_dir : str
+        Directory containing downloaded images
+    batch_size : int, default=1000
+        Batch size for processing parquet file
+    status_column : str, default="status"
+        Column name for download status
+    img_hash_column : str, default="img_hash"
+        Column name for image hash (for deduplication)
+    filename_column : str, default="filename"
+        Column name for image filenames
+    species_column : str, default="speciesKey"
+        Column name for species identifier
+    max_img_per_species : int, optional
+        Maximum images to keep per species based on ACTUAL downloaded images.
+        Applied AFTER all filtering (OCR, YOLO, download failures).
+        If None, no limit is enforced.
+    n_split : int, default=5
+        Number of cross-validation folds to create
+    ood_th : int, default=5
+        Threshold for out-of-distribution classification
+    dry_run : bool, default=False
+        If True, report changes without modifying files
+    remove_itermediate : bool, default=True
+        Remove intermediate parquet files after processing
+    suffix : str, default="_postprocessed"
+        Suffix for final output parquet file
+    sftp_params : dict, optional
+        SFTP parameters for remote file operations
+        
+    Returns
+    -------
+    Path
+        Path to the final postprocessed parquet file
+    """
     print("Start postprocessing.")
     assert isinstance(parquet_path, (Path, str)), f"Error: parquet_path has a wrong type {type(parquet_path)}"
     if isinstance(parquet_path, str): 
@@ -2059,9 +2923,27 @@ def postprocess(
         ))
     print("Empty folders removed.")
 
+    # Apply max_img_per_species limit based on actual downloaded images
+    if max_img_per_species is not None:
+        print(f"Enforcing max_img_per_species={max_img_per_species} on successfully downloaded images.")
+        out3_path = limit_images_per_species(
+            parquet_path=out2_path,
+            img_dir=img_dir,
+            batch_size=batch_size,
+            max_img_per_species=max_img_per_species,
+            species_column=species_column,
+            filename_column=filename_column,
+            status_column=status_column,
+            dry_run=dry_run,
+            sftp_params=sftp_params,
+        )
+        if remove_itermediate: os.remove(out2_path)
+    else:
+        out3_path = out2_path
+
     print("Adding `set` column.")
     add_set_column(
-        parquet_path=out2_path,
+        parquet_path=out3_path,
         batch_size=batch_size,
         n_split=n_split,
         ood_th=ood_th,
@@ -2070,9 +2952,11 @@ def postprocess(
     )
     print("`set` column added.")
 
-    if remove_itermediate: os.remove(out2_path)
+    if remove_itermediate: os.remove(out3_path)
 
     print(f"Done postprocessing. Final postprocessed Parquet file is in {postprocessed_path}")
+    
+    return postprocessed_path
 
 # -----------------------------------------------------------------------------
 # Config and main
